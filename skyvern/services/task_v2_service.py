@@ -22,7 +22,6 @@ from skyvern.forge.sdk.db.enums import OrganizationAuthTokenType
 from skyvern.forge.sdk.schemas.organizations import Organization
 from skyvern.forge.sdk.schemas.task_runs import TaskRunType
 from skyvern.forge.sdk.schemas.task_v2 import TaskV2, TaskV2Metadata, TaskV2Status, ThoughtScenario, ThoughtType
-from skyvern.forge.sdk.schemas.tasks import ProxyLocation
 from skyvern.forge.sdk.schemas.workflow_runs import WorkflowRunTimeline, WorkflowRunTimelineType
 from skyvern.forge.sdk.workflow.models.block import (
     BlockResult,
@@ -54,6 +53,7 @@ from skyvern.forge.sdk.workflow.models.yaml import (
     WorkflowCreateYAMLRequest,
     WorkflowDefinitionYAML,
 )
+from skyvern.schemas.runs import ProxyLocation
 from skyvern.webeye.browser_factory import BrowserState
 from skyvern.webeye.scraper.scraper import ElementTreeFormat, ScrapedPage, scrape_website
 from skyvern.webeye.utils.page import SkyvernFrame
@@ -95,9 +95,9 @@ async def initialize_task_v2(
     webhook_callback_url: str | None = None,
     publish_workflow: bool = False,
     parent_workflow_run_id: str | None = None,
-    create_task_run: bool = False,
     extracted_information_schema: dict | list | str | None = None,
     error_code_mapping: dict | None = None,
+    create_task_run: bool = False,
 ) -> TaskV2:
     task_v2 = await app.DATABASE.create_task_v2(
         prompt=user_prompt,

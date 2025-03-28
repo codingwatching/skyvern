@@ -1,5 +1,4 @@
 import datetime
-import hashlib
 import os
 import uuid
 from enum import Enum
@@ -20,7 +19,6 @@ from fastapi import (
     status,
 )
 from fastapi.responses import ORJSONResponse
-from sqlalchemy.exc import OperationalError
 
 from skyvern import analytics
 from skyvern.config import settings
@@ -30,7 +28,6 @@ from skyvern.forge.sdk.api.aws import aws_client
 from skyvern.forge.sdk.api.llm.exceptions import LLMProviderError
 from skyvern.forge.sdk.artifact.models import Artifact
 from skyvern.forge.sdk.core import skyvern_context
-from skyvern.forge.sdk.core.hashing import generate_url_hash
 from skyvern.forge.sdk.core.permissions.permission_checker_factory import PermissionCheckerFactory
 from skyvern.forge.sdk.core.security import generate_skyvern_signature
 from skyvern.forge.sdk.db.enums import OrganizationAuthTokenType
@@ -43,8 +40,8 @@ from skyvern.forge.sdk.schemas.organizations import (
     Organization,
     OrganizationUpdate,
 )
-from skyvern.forge.sdk.schemas.task_generations import GenerateTaskRequest, TaskGeneration, TaskGenerationBase
-from skyvern.forge.sdk.schemas.task_runs import TaskRunResponse, TaskRunType
+from skyvern.forge.sdk.schemas.task_generations import GenerateTaskRequest, TaskGeneration
+from skyvern.forge.sdk.schemas.task_runs import TaskRunType
 from skyvern.forge.sdk.schemas.task_v2 import TaskV2Request
 from skyvern.forge.sdk.schemas.tasks import (
     CreateTaskResponse,
@@ -56,7 +53,7 @@ from skyvern.forge.sdk.schemas.tasks import (
     TaskStatus,
 )
 from skyvern.forge.sdk.schemas.workflow_runs import WorkflowRunTimeline
-from skyvern.forge.sdk.services import org_auth_service, task_run_service, task_v2_service
+from skyvern.forge.sdk.services import org_auth_service, task_run_service
 from skyvern.forge.sdk.workflow.exceptions import (
     FailedToCreateWorkflow,
     FailedToUpdateWorkflow,
@@ -74,9 +71,12 @@ from skyvern.forge.sdk.workflow.models.workflow import (
     WorkflowStatus,
 )
 from skyvern.forge.sdk.workflow.models.yaml import WorkflowCreateYAMLRequest
+from skyvern.schemas.runs import RunEngine, TaskRunRequest, TaskRunResponse
+from skyvern.services import task_v1_service, task_v2_service
 from skyvern.webeye.actions.actions import Action
 from skyvern.webeye.schemas import BrowserSessionResponse
 
+official_api_router = APIRouter()
 base_router = APIRouter()
 v2_router = APIRouter()
 
@@ -190,31 +190,13 @@ async def run_task_v1(
     analytics.capture("skyvern-oss-agent-task-create", data={"url": task.url})
     await PermissionCheckerFactory.get_instance().check(current_org, browser_session_id=task.browser_session_id)
 
-    created_task = await app.agent.create_task(task, current_org.organization_id)
-    url_hash = generate_url_hash(task.url)
-    await app.DATABASE.create_task_run(
-        task_run_type=TaskRunType.task_v1,
-        organization_id=current_org.organization_id,
-        run_id=created_task.task_id,
-        title=task.title,
-        url=task.url,
-        url_hash=url_hash,
-    )
-    if x_max_steps_override:
-        LOG.info(
-            "Overriding max steps per run",
-            max_steps_override=x_max_steps_override,
-            organization_id=current_org.organization_id,
-            task_id=created_task.task_id,
-        )
-    await AsyncExecutorFactory.get_executor().execute_task(
+    created_task = await task_v1_service.run_task(
+        task=task,
+        organization=current_org,
+        x_max_steps_override=x_max_steps_override,
+        x_api_key=x_api_key,
         request=request,
         background_tasks=background_tasks,
-        task_id=created_task.task_id,
-        organization_id=current_org.organization_id,
-        max_steps_override=x_max_steps_override,
-        browser_session_id=task.browser_session_id,
-        api_key=x_api_key,
     )
     return CreateTaskResponse(task_id=created_task.task_id)
 
@@ -1148,59 +1130,11 @@ async def generate_task(
     data: GenerateTaskRequest,
     current_org: Organization = Depends(org_auth_service.get_current_org),
 ) -> TaskGeneration:
-    user_prompt = data.prompt
-    hash_object = hashlib.sha256()
-    hash_object.update(user_prompt.encode("utf-8"))
-    user_prompt_hash = hash_object.hexdigest()
-    # check if there's a same user_prompt within the past x Hours
-    # in the future, we can use vector db to fetch similar prompts
-    existing_task_generation = await app.DATABASE.get_task_generation_by_prompt_hash(
-        user_prompt_hash=user_prompt_hash, query_window_hours=settings.PROMPT_CACHE_WINDOW_HOURS
+    analytics.capture("skyvern-oss-agent-generate-task")
+    return await task_v1_service.generate_task(
+        user_prompt=data.prompt,
+        organization=current_org,
     )
-    if existing_task_generation:
-        new_task_generation = await app.DATABASE.create_task_generation(
-            organization_id=current_org.organization_id,
-            user_prompt=data.prompt,
-            user_prompt_hash=user_prompt_hash,
-            url=existing_task_generation.url,
-            navigation_goal=existing_task_generation.navigation_goal,
-            navigation_payload=existing_task_generation.navigation_payload,
-            data_extraction_goal=existing_task_generation.data_extraction_goal,
-            extracted_information_schema=existing_task_generation.extracted_information_schema,
-            llm=existing_task_generation.llm,
-            llm_prompt=existing_task_generation.llm_prompt,
-            llm_response=existing_task_generation.llm_response,
-            source_task_generation_id=existing_task_generation.task_generation_id,
-        )
-        return new_task_generation
-
-    llm_prompt = prompt_engine.load_prompt("generate-task", user_prompt=data.prompt)
-    try:
-        llm_response = await app.LLM_API_HANDLER(prompt=llm_prompt, prompt_name="generate-task")
-        parsed_task_generation_obj = TaskGenerationBase.model_validate(llm_response)
-
-        # generate a TaskGenerationModel
-        task_generation = await app.DATABASE.create_task_generation(
-            organization_id=current_org.organization_id,
-            user_prompt=data.prompt,
-            user_prompt_hash=user_prompt_hash,
-            url=parsed_task_generation_obj.url,
-            navigation_goal=parsed_task_generation_obj.navigation_goal,
-            navigation_payload=parsed_task_generation_obj.navigation_payload,
-            data_extraction_goal=parsed_task_generation_obj.data_extraction_goal,
-            extracted_information_schema=parsed_task_generation_obj.extracted_information_schema,
-            suggested_title=parsed_task_generation_obj.suggested_title,
-            llm=settings.LLM_KEY,
-            llm_prompt=llm_prompt,
-            llm_response=str(llm_response),
-        )
-        return task_generation
-    except LLMProviderError:
-        LOG.error("Failed to generate task", exc_info=True)
-        raise HTTPException(status_code=400, detail="Failed to generate task. Please try again later.")
-    except OperationalError:
-        LOG.error("Database error when generating task", exc_info=True, user_prompt=data.prompt)
-        raise HTTPException(status_code=500, detail="Failed to generate task. Please try again later.")
 
 
 @base_router.put(
@@ -1421,9 +1355,9 @@ async def get_task_v2(
 @base_router.get(
     "/browser_sessions/{browser_session_id}",
     response_model=BrowserSessionResponse,
-    tags=["browser"],
+    tags=["session"],
     openapi_extra={
-        "x-fern-sdk-group-name": "browser",
+        "x-fern-sdk-group-name": "session",
         "x-fern-sdk-method-name": "get_browser_session",
     },
 )
@@ -1449,9 +1383,9 @@ async def get_browser_session(
 @base_router.get(
     "/browser_sessions",
     response_model=list[BrowserSessionResponse],
-    tags=["browser"],
+    tags=["session"],
     openapi_extra={
-        "x-fern-sdk-group-name": "browser",
+        "x-fern-sdk-group-name": "session",
         "x-fern-sdk-method-name": "get_browser_sessions",
     },
 )
@@ -1472,9 +1406,9 @@ async def get_browser_sessions(
 @base_router.post(
     "/browser_sessions",
     response_model=BrowserSessionResponse,
-    tags=["browser"],
+    tags=["session"],
     openapi_extra={
-        "x-fern-sdk-group-name": "browser",
+        "x-fern-sdk-group-name": "session",
         "x-fern-sdk-method-name": "create_browser_session",
     },
 )
@@ -1492,9 +1426,9 @@ async def create_browser_session(
 
 @base_router.post(
     "/browser_sessions/{session_id}/close",
-    tags=["browser"],
+    tags=["session"],
     openapi_extra={
-        "x-fern-sdk-group-name": "browser",
+        "x-fern-sdk-group-name": "session",
         "x-fern-sdk-method-name": "close_browser_session",
     },
 )
@@ -1561,3 +1495,130 @@ async def _flatten_workflow_run_timeline(organization_id: str, workflow_run_id: 
         final_workflow_run_block_timeline.extend(thought_timeline)
     final_workflow_run_block_timeline.sort(key=lambda x: x.created_at, reverse=True)
     return final_workflow_run_block_timeline
+
+
+@official_api_router.post(
+    "/tasks",
+    tags=["agent"],
+    openapi_extra={
+        "x-fern-sdk-group-name": "agent",
+        "x-fern-sdk-method-name": "run_task",
+    },
+)
+@official_api_router.post("/tasks/", include_in_schema=False)
+async def run_task(
+    request: Request,
+    background_tasks: BackgroundTasks,
+    run_request: TaskRunRequest,
+    current_org: Organization = Depends(org_auth_service.get_current_org),
+    x_api_key: Annotated[str | None, Header()] = None,
+) -> TaskRunResponse:
+    analytics.capture("skyvern-oss-run-task", data={"url": run_request.url})
+    await PermissionCheckerFactory.get_instance().check(current_org, browser_session_id=run_request.browser_session_id)
+
+    if run_request.engine == RunEngine.skyvern_v1:
+        # create task v1
+        # if there's no url, call task generation first to generate the url, data schema if any
+        url = run_request.url
+        data_extraction_goal = None
+        data_extraction_schema = run_request.data_extraction_schema
+        navigation_goal = run_request.goal
+        navigation_payload = None
+        if not url:
+            task_generation = await task_v1_service.generate_task(
+                user_prompt=run_request.goal,
+                organization=current_org,
+            )
+            url = task_generation.url
+            navigation_goal = task_generation.navigation_goal or run_request.goal
+            navigation_payload = task_generation.navigation_payload
+            data_extraction_goal = task_generation.data_extraction_goal
+            data_extraction_schema = data_extraction_schema or task_generation.extracted_information_schema
+
+        task_v1_request = TaskRequest(
+            title=run_request.title,
+            url=url,
+            navigation_goal=navigation_goal,
+            navigation_payload=navigation_payload,
+            data_extraction_goal=data_extraction_goal,
+            extracted_information_schema=data_extraction_schema,
+            error_code_mapping=run_request.error_code_mapping,
+            proxy_location=run_request.proxy_location,
+            browser_session_id=run_request.browser_session_id,
+        )
+        task_v1_response = await task_v1_service.run_task(
+            task=task_v1_request,
+            organization=current_org,
+            x_max_steps_override=run_request.max_steps,
+            x_api_key=x_api_key,
+            request=request,
+            background_tasks=background_tasks,
+        )
+        # build the task run response
+        return TaskRunResponse(
+            run_id=task_v1_response.task_id,
+            title=task_v1_response.title,
+            status=str(task_v1_response.status),
+            created_at=task_v1_response.created_at,
+            updated_at=task_v1_response.modified_at,
+            engine=RunEngine.skyvern_v1,
+            goal=task_v1_response.navigation_goal,
+            url=task_v1_response.url,
+            output=task_v1_response.extracted_information,
+            failure_reason=task_v1_response.failure_reason,
+            data_extraction_schema=task_v1_response.extracted_information_schema,
+            error_code_mapping=task_v1_response.error_code_mapping,
+            proxy_location=task_v1_response.proxy_location,
+            totp_identifier=task_v1_response.totp_identifier,
+            totp_url=task_v1_response.totp_verification_url,
+            webhook_url=task_v1_response.webhook_callback_url,
+            max_steps=task_v1_response.max_steps_per_run,
+        )
+    if run_request.engine == RunEngine.skyvern_v2:
+        # create task v2
+        try:
+            task_v2 = await task_v2_service.initialize_task_v2(
+                organization=current_org,
+                user_prompt=run_request.goal,
+                user_url=run_request.url,
+                totp_identifier=run_request.totp_identifier,
+                totp_verification_url=run_request.totp_url,
+                webhook_callback_url=run_request.webhook_url,
+                proxy_location=run_request.proxy_location,
+                publish_workflow=run_request.publish_workflow,
+                extracted_information_schema=run_request.data_extraction_schema,
+                error_code_mapping=run_request.error_code_mapping,
+                create_task_run=True,
+            )
+        except LLMProviderError:
+            LOG.error("LLM failure to initialize task v2", exc_info=True)
+            raise HTTPException(
+                status_code=500, detail="Skyvern LLM failure to initialize task v2. Please try again later."
+            )
+        await AsyncExecutorFactory.get_executor().execute_task_v2(
+            request=request,
+            background_tasks=background_tasks,
+            organization_id=current_org.organization_id,
+            task_v2_id=task_v2.observer_cruise_id,
+            max_steps_override=run_request.max_steps,
+            browser_session_id=run_request.browser_session_id,
+        )
+        return TaskRunResponse(
+            run_id=task_v2.observer_cruise_id,
+            title=run_request.title,
+            status=str(task_v2.status),
+            engine=RunEngine.skyvern_v2,
+            goal=task_v2.prompt,
+            url=task_v2.url,
+            output=task_v2.output,
+            failure_reason=task_v2.failure_reason,
+            webhook_url=task_v2.webhook_callback_url,
+            totp_identifier=task_v2.totp_identifier,
+            totp_url=task_v2.totp_verification_url,
+            proxy_location=task_v2.proxy_location,
+            error_code_mapping=task_v2.error_code_mapping,
+            data_extraction_schema=task_v2.extracted_information_schema,
+            created_at=task_v2.created_at,
+            modified_at=task_v2.modified_at,
+        )
+    raise HTTPException(status_code=400, detail=f"Invalid agent engine: {run_request.engine}")

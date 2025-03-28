@@ -25,7 +25,7 @@ from skyvern.forge.sdk.db.enums import TaskType
 from skyvern.forge.sdk.models import Step, StepStatus
 from skyvern.forge.sdk.schemas.files import FileInfo
 from skyvern.forge.sdk.schemas.organizations import Organization
-from skyvern.forge.sdk.schemas.tasks import ProxyLocation, Task
+from skyvern.forge.sdk.schemas.tasks import Task
 from skyvern.forge.sdk.schemas.workflow_runs import WorkflowRunBlock, WorkflowRunTimeline, WorkflowRunTimelineType
 from skyvern.forge.sdk.workflow.exceptions import (
     ContextParameterSourceNotDefined,
@@ -90,6 +90,7 @@ from skyvern.forge.sdk.workflow.models.yaml import (
     WorkflowCreateYAMLRequest,
     WorkflowDefinitionYAML,
 )
+from skyvern.schemas.runs import ProxyLocation
 from skyvern.webeye.browser_factory import BrowserState
 
 LOG = structlog.get_logger()
@@ -1959,6 +1960,7 @@ class WorkflowService:
             if block.parent_workflow_run_block_id:
                 if block.parent_workflow_run_block_id in block_map:
                     block_map[block.parent_workflow_run_block_id].children.append(workflow_run_timeline)
+                    block_map[block.workflow_run_block_id] = workflow_run_timeline
                 else:
                     # put the block back to the queue
                     workflow_run_blocks.append(block)

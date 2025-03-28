@@ -1882,12 +1882,17 @@ function createHintMarkersForGroups(groups) {
     } catch (e) {
       // Ensure trustedTypes is available
       if (typeof trustedTypes !== "undefined") {
-        const escapeHTMLPolicy = trustedTypes.createPolicy("default", {
-          createHTML: (string) => string,
-        });
-        hintMarker.element.innerHTML = escapeHTMLPolicy.createHTML(
-          hintMarker.hintString.toUpperCase(),
-        );
+        try {
+          const escapeHTMLPolicy = trustedTypes.createPolicy("hint-policy", {
+            createHTML: (string) => string,
+          });
+          hintMarker.element.innerHTML = escapeHTMLPolicy.createHTML(
+            hintMarker.hintString.toUpperCase(),
+          );
+        } catch (policyError) {
+          console.warn("Could not create trusted types policy:", policyError);
+          // Skip updating the hint marker if policy creation fails
+        }
       } else {
         console.error("trustedTypes is not supported in this environment.");
       }
@@ -1952,13 +1957,23 @@ function removeBoundingBoxes() {
   }
 }
 
-async function scrollToTop(
+function safeWindowScroll(x, y) {
+  if (typeof window.scroll === "function") {
+    window.scroll({ left: x, top: y, behavior: "instant" });
+  } else if (typeof window.scrollTo === "function") {
+    window.scrollTo({ left: x, top: y, behavior: "instant" });
+  } else {
+    console.error("window.scroll and window.scrollTo are both not supported");
+  }
+}
+
+async function safeScrollToTop(
   draw_boxes,
   frame = "main.frame",
   frame_index = undefined,
 ) {
   removeBoundingBoxes();
-  window.scroll({ left: 0, top: 0, behavior: "instant" });
+  safeWindowScroll(0, 0);
   if (draw_boxes) {
     await buildElementsAndDrawBoundingBoxes(frame, frame_index);
   }
@@ -1970,7 +1985,7 @@ function getScrollXY() {
 }
 
 function scrollToXY(x, y) {
-  window.scroll({ left: x, top: y, behavior: "instant" });
+  safeWindowScroll(x, y);
 }
 
 async function scrollToNextPage(
@@ -1993,11 +2008,15 @@ async function scrollToNextPage(
 }
 
 function isWindowScrollable() {
+  const documentBody = document.body;
+  const documentElement = document.documentElement;
+  if (!documentBody || !documentElement) {
+    return false;
+  }
+
   // Check if the body's overflow style is set to hidden
-  const bodyOverflow = getElementComputedStyle(document.body)?.overflow;
-  const htmlOverflow = getElementComputedStyle(
-    document.documentElement,
-  )?.overflow;
+  const bodyOverflow = getElementComputedStyle(documentBody)?.overflow;
+  const htmlOverflow = getElementComputedStyle(documentElement)?.overflow;
 
   // Check if the document height is greater than the window height
   const isScrollable =
@@ -2165,7 +2184,7 @@ function waitForNextFrame() {
   });
 }
 
-function sleep(ms) {
+function asyncSleepFor(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
@@ -2311,7 +2330,7 @@ async function stopGlobalIncrementalObserver() {
     (await window.globalParsedElementCounter.get()) <
     window.globalOneTimeIncrementElements.length
   ) {
-    await sleep(100);
+    await asyncSleepFor(100);
   }
   window.globalOneTimeIncrementElements = [];
   window.globalDomDepthMap = new Map();
@@ -2322,7 +2341,7 @@ async function getIncrementElements() {
     (await window.globalParsedElementCounter.get()) <
     window.globalOneTimeIncrementElements.length
   ) {
-    await sleep(100);
+    await asyncSleepFor(100);
   }
 
   // cleanup the chidren tree, remove the duplicated element
