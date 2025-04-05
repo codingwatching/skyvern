@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import asyncio
 import os
+import socket
+import subprocess
 import time
 import uuid
 from datetime import datetime
@@ -9,7 +11,7 @@ from pathlib import Path
 from typing import Any, Awaitable, Callable, Protocol
 
 import aiofiles
-import httpx
+import psutil
 import structlog
 from playwright.async_api import BrowserContext, ConsoleMessage, Download, Page, Playwright
 from pydantic import BaseModel, PrivateAttr
@@ -26,7 +28,7 @@ from skyvern.exceptions import (
 )
 from skyvern.forge.sdk.api.files import get_download_dir, make_temp_directory
 from skyvern.forge.sdk.core.skyvern_context import current, ensure_context
-from skyvern.forge.sdk.schemas.tasks import ProxyLocation, get_tzinfo_from_proxy
+from skyvern.schemas.runs import ProxyLocation, get_tzinfo_from_proxy
 from skyvern.webeye.utils.page import SkyvernFrame
 
 LOG = structlog.get_logger()
@@ -304,6 +306,31 @@ def _get_cdp_port(kwargs: dict) -> int | None:
     return None
 
 
+def _is_port_in_use(port: int) -> bool:
+    """Check if a port is already in use."""
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        try:
+            s.bind(("localhost", port))
+            return False
+        except socket.error:
+            return True
+
+
+def _is_chrome_running() -> bool:
+    """Check if Chrome is already running."""
+    chrome_process_names = ["chrome", "google-chrome", "google chrome"]
+    for proc in psutil.process_iter(["name"]):
+        try:
+            proc_name = proc.info["name"].lower()
+            if proc_name == "chrome_crashpad_handler":
+                continue
+            if any(chrome_name in proc_name for chrome_name in chrome_process_names):
+                return True
+        except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
+            pass
+    return False
+
+
 async def _create_headless_chromium(
     playwright: Playwright, proxy_location: ProxyLocation | None = None, **kwargs: dict
 ) -> tuple[BrowserContext, BrowserArtifacts, BrowserCleanupFunc]:
@@ -353,27 +380,35 @@ async def _create_headful_chromium(
 async def _create_cdp_connection_browser(
     playwright: Playwright, proxy_location: ProxyLocation | None = None, **kwargs: dict
 ) -> tuple[BrowserContext, BrowserArtifacts, BrowserCleanupFunc]:
+    browser_type = settings.BROWSER_TYPE
+    browser_path = settings.CHROME_EXECUTABLE_PATH
+
+    if browser_type == "cdp-connect" and browser_path:
+        # First check if Chrome is already running
+        if _is_chrome_running():
+            raise Exception(
+                "Chrome is already running. Please close all Chrome instances before starting with remote debugging."
+            )
+
+        # Then check if the debugging port is already in use
+        if _is_port_in_use(9222):
+            raise Exception("Port 9222 is already in use. Another process may be using this port.")
+
+        browser_process = subprocess.Popen(
+            [browser_path, "--remote-debugging-port=9222"], stdout=subprocess.PIPE, stderr=subprocess.PIPE
+        )
+        # Add small delay to allow browser to start
+        time.sleep(1)
+        if browser_process.poll() is not None:
+            raise Exception(f"Failed to open browser. browser_path: {browser_path}")
+
     browser_args = BrowserContextFactory.build_browser_args()
 
     browser_artifacts = BrowserContextFactory.build_browser_artifacts(
         har_path=browser_args["record_har_path"],
     )
 
-    remote_browser_url = None
-    try:
-        async with httpx.AsyncClient() as client:
-            response = await client.get(f"{settings.BROWSER_REMOTE_DEBUGGING_URL}/json/version")
-            remote_browser_url = response.json().get("webSocketDebuggerUrl")
-    except Exception:
-        raise Exception(
-            f"Cannot find the webSocketDebuggerUrl from the browser remote debugging {settings.BROWSER_REMOTE_DEBUGGING_URL}"
-        )
-
-    if not remote_browser_url:
-        raise Exception(
-            f"Cannot find the webSocketDebuggerUrl from the browser remote debugging {settings.BROWSER_REMOTE_DEBUGGING_URL}"
-        )
-
+    remote_browser_url = settings.BROWSER_REMOTE_DEBUGGING_URL
     LOG.info("Connecting browser CDP connection", remote_browser_url=remote_browser_url)
     browser = await playwright.chromium.connect_over_cdp(remote_browser_url)
 
@@ -432,7 +467,13 @@ class BrowserState:
         pages = self.browser_context.pages
         for page in pages:
             if page != cur_page:
-                await page.close()
+                try:
+                    async with asyncio.timeout(2):
+                        await page.close()
+                except asyncio.TimeoutError:
+                    LOG.warning("Timeout to close the page. Skip closing the page", url=page.url)
+                except Exception:
+                    LOG.exception("Error while closing the page", url=page.url)
 
     async def check_and_fix_state(
         self,

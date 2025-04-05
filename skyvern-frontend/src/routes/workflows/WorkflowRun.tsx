@@ -35,10 +35,10 @@ import { useWorkflowRunQuery } from "./hooks/useWorkflowRunQuery";
 import { WorkflowRunTimeline } from "./workflowRun/WorkflowRunTimeline";
 import { useWorkflowRunTimelineQuery } from "./hooks/useWorkflowRunTimelineQuery";
 import { findActiveItem } from "./workflowRun/workflowTimelineUtils";
-import { getAggregatedExtractedInformation } from "./workflowRun/workflowRunUtils";
 import { Label } from "@/components/ui/label";
 import { CodeEditor } from "./components/CodeEditor";
 import { cn } from "@/util/utils";
+import { ScrollArea, ScrollAreaViewport } from "@/components/ui/scroll-area";
 
 function WorkflowRun() {
   const [searchParams, setSearchParams] = useSearchParams();
@@ -137,13 +137,18 @@ function WorkflowRun() {
   const isTaskv2Run = workflowRun && workflowRun.task_v2 !== null;
 
   const outputs = workflowRun?.outputs;
-  const aggregatedExtractedInformation = getAggregatedExtractedInformation(
-    outputs ?? {},
-  );
+  const extractedInformation =
+    typeof outputs === "object" &&
+    outputs !== null &&
+    "extracted_information" in outputs
+      ? (outputs.extracted_information as Record<string, unknown>)
+      : null;
 
-  const hasSomeExtractedInformation = Object.values(
-    aggregatedExtractedInformation,
-  ).some((value) => value !== null);
+  const hasSomeExtractedInformation = extractedInformation
+    ? Object.values(extractedInformation).some((value) => value !== null)
+    : false;
+
+  const hasTaskv2Output = Boolean(isTaskv2Run && workflowRun.task_v2?.output);
 
   const hasFileUrls =
     isFetched &&
@@ -154,11 +159,12 @@ function WorkflowRun() {
     ? (workflowRun.downloaded_file_urls as string[])
     : [];
 
-  const showBoth = hasSomeExtractedInformation && hasFileUrls;
+  const showBoth =
+    (hasSomeExtractedInformation || hasTaskv2Output) && hasFileUrls;
 
   const showOutputSection =
     workflowRunIsFinalized &&
-    (hasSomeExtractedInformation || hasFileUrls) &&
+    (hasSomeExtractedInformation || hasFileUrls || hasTaskv2Output) &&
     workflowRun.status === Status.Completed;
 
   return (
@@ -268,12 +274,18 @@ function WorkflowRun() {
             "grid-cols-2": showBoth,
           })}
         >
-          {hasSomeExtractedInformation && (
+          {(hasSomeExtractedInformation || hasTaskv2Output) && (
             <div className="space-y-4">
-              <Label>Extracted Information</Label>
+              <Label>
+                {hasTaskv2Output ? "Output" : "Extracted Information"}
+              </Label>
               <CodeEditor
                 language="json"
-                value={JSON.stringify(aggregatedExtractedInformation, null, 2)}
+                value={
+                  hasTaskv2Output
+                    ? JSON.stringify(workflowRun.task_v2?.output, null, 2)
+                    : JSON.stringify(extractedInformation, null, 2)
+                }
                 readOnly
                 maxHeight="250px"
               />
@@ -282,22 +294,27 @@ function WorkflowRun() {
           {hasFileUrls && (
             <div className="space-y-4">
               <Label>Downloaded Files</Label>
-              <div className="space-y-2">
-                {fileUrls.length > 0 ? (
-                  fileUrls.map((url, index) => {
-                    return (
-                      <div key={url} title={url} className="flex gap-2">
-                        <FileIcon className="size-6" />
-                        <a href={url} className="underline underline-offset-4">
-                          <span>{`File ${index + 1}`}</span>
-                        </a>
-                      </div>
-                    );
-                  })
-                ) : (
-                  <div className="text-sm">No files downloaded</div>
-                )}
-              </div>
+              <ScrollArea>
+                <ScrollAreaViewport className="max-h-[250px] space-y-2">
+                  {fileUrls.length > 0 ? (
+                    fileUrls.map((url, index) => {
+                      return (
+                        <div key={url} title={url} className="flex gap-2">
+                          <FileIcon className="size-6" />
+                          <a
+                            href={url}
+                            className="underline underline-offset-4"
+                          >
+                            <span>{`File ${index + 1}`}</span>
+                          </a>
+                        </div>
+                      );
+                    })
+                  ) : (
+                    <div className="text-sm">No files downloaded</div>
+                  )}
+                </ScrollAreaViewport>
+              </ScrollArea>
             </div>
           )}
         </div>

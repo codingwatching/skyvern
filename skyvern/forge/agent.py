@@ -68,6 +68,7 @@ from skyvern.forge.sdk.schemas.tasks import Task, TaskRequest, TaskResponse, Tas
 from skyvern.forge.sdk.workflow.context_manager import WorkflowRunContext
 from skyvern.forge.sdk.workflow.models.block import ActionBlock, BaseTaskBlock, ValidationBlock
 from skyvern.forge.sdk.workflow.models.workflow import Workflow, WorkflowRun, WorkflowRunStatus
+from skyvern.utils.prompt_engine import load_prompt_with_elements
 from skyvern.webeye.actions.actions import (
     Action,
     ActionStatus,
@@ -109,18 +110,6 @@ class ForgeAgent:
                 "Additional modules loaded",
                 modules=settings.ADDITIONAL_MODULES,
             )
-        LOG.info(
-            "Initializing ForgeAgent",
-            env=settings.ENV,
-            execute_all_steps=settings.EXECUTE_ALL_STEPS,
-            browser_type=settings.BROWSER_TYPE,
-            max_scraping_retries=settings.MAX_SCRAPING_RETRIES,
-            video_path=settings.VIDEO_PATH,
-            browser_action_timeout_ms=settings.BROWSER_ACTION_TIMEOUT_MS,
-            max_steps_per_run=settings.MAX_STEPS_PER_RUN,
-            long_running_task_warning_ratio=settings.LONG_RUNNING_TASK_WARNING_RATIO,
-            debug_mode=settings.DEBUG_MODE,
-        )
         self.async_operation_pool = AsyncOperationPool()
 
     async def create_task_and_step_from_block(
@@ -989,6 +978,10 @@ class ForgeAgent:
 
                 self.async_operation_pool.run_operation(task.task_id, AgentPhase.action)
                 current_page = await browser_state.must_get_working_page()
+                if isinstance(action, CompleteAction) and not complete_verification:
+                    # Do not verify the complete action when complete_verification is False
+                    # set verified to True will skip the completion verification
+                    action.verified = True
                 results = await ActionHandler.handle_action(scraped_page, task, step, current_page, action)
                 detailed_agent_step_output.actions_and_results[action_idx] = (
                     action,
@@ -1204,11 +1197,12 @@ class ForgeAgent:
         )
         scraped_page_refreshed = await scraped_page.refresh(draw_boxes=False)
 
-        verification_prompt = prompt_engine.load_prompt(
-            "check-user-goal",
+        verification_prompt = load_prompt_with_elements(
+            scraped_page=scraped_page_refreshed,
+            prompt_engine=prompt_engine,
+            template_name="check-user-goal",
             navigation_goal=task.navigation_goal,
             navigation_payload=task.navigation_payload,
-            elements=scraped_page_refreshed.build_element_tree(ElementTreeFormat.HTML),
             complete_criterion=task.complete_criterion,
         )
 
@@ -1440,7 +1434,7 @@ class ForgeAgent:
             task,
             step,
             browser_state,
-            element_tree_in_prompt,
+            scraped_page,
             verification_code_check=bool(task.totp_verification_url or task.totp_identifier),
             expire_verification_code=True,
         )
@@ -1478,7 +1472,7 @@ class ForgeAgent:
         task: Task,
         step: Step,
         browser_state: BrowserState,
-        element_tree_in_prompt: str,
+        scraped_page: ScrapedPage,
         verification_code_check: bool = False,
         expire_verification_code: bool = False,
     ) -> str:
@@ -1533,13 +1527,14 @@ class ForgeAgent:
             raise UnsupportedTaskType(task_type=task_type)
 
         context = skyvern_context.ensure_context()
-        return prompt_engine.load_prompt(
-            template=template,
+        return load_prompt_with_elements(
+            scraped_page=scraped_page,
+            prompt_engine=prompt_engine,
+            template_name=template,
             navigation_goal=navigation_goal,
             navigation_payload_str=json.dumps(final_navigation_payload),
             starting_url=starting_url,
             current_url=current_url,
-            elements=element_tree_in_prompt,
             data_extraction_goal=task.data_extraction_goal,
             action_history=actions_and_results_str,
             error_code_mapping_str=(json.dumps(task.error_code_mapping) if task.error_code_mapping else None),
@@ -2308,12 +2303,11 @@ class ForgeAgent:
             current_context = skyvern_context.ensure_context()
             current_context.totp_codes[task.task_id] = verification_code
 
-            element_tree_in_prompt: str = scraped_page.build_element_tree(ElementTreeFormat.HTML)
             extract_action_prompt = await self._build_extract_action_prompt(
                 task,
                 step,
                 browser_state,
-                element_tree_in_prompt,
+                scraped_page,
                 verification_code_check=False,
                 expire_verification_code=True,
             )
