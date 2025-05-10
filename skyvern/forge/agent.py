@@ -109,9 +109,9 @@ class ForgeAgent:
     def __init__(self) -> None:
         if settings.ADDITIONAL_MODULES:
             for module in settings.ADDITIONAL_MODULES:
-                LOG.info("Loading additional module", module=module)
+                LOG.debug("Loading additional module", module=module)
                 __import__(module)
-            LOG.info(
+            LOG.debug(
                 "Additional modules loaded",
                 modules=settings.ADDITIONAL_MODULES,
             )
@@ -1430,6 +1430,7 @@ class ForgeAgent:
         if not llm_caller.message_history:
             llm_response = await llm_caller.call(
                 prompt=task.navigation_goal,
+                step=step,
                 screenshots=scraped_page.screenshots,
                 use_message_history=True,
                 tools=tools,
@@ -1440,6 +1441,7 @@ class ForgeAgent:
             )
         else:
             llm_response = await llm_caller.call(
+                step=step,
                 screenshots=scraped_page.screenshots,
                 use_message_history=True,
                 tools=tools,
