@@ -2,22 +2,21 @@
 
 import typing
 from ..core.client_wrapper import SyncClientWrapper
-from ..core.request_options import RequestOptions
-from .types.agent_get_run_response import AgentGetRunResponse
-from ..core.jsonable_encoder import jsonable_encoder
-from ..core.pydantic_utilities import parse_obj_as
-from ..errors.not_found_error import NotFoundError
-from ..errors.unprocessable_entity_error import UnprocessableEntityError
-from json.decoder import JSONDecodeError
-from ..core.api_error import ApiError
-from ..types.workflow import Workflow
 from ..types.run_engine import RunEngine
 from ..types.proxy_location import ProxyLocation
 from ..types.task_run_request_data_extraction_schema import TaskRunRequestDataExtractionSchema
+from ..core.request_options import RequestOptions
 from ..types.task_run_response import TaskRunResponse
 from ..core.serialization import convert_and_respect_annotation_metadata
+from ..core.pydantic_utilities import parse_obj_as
 from ..errors.bad_request_error import BadRequestError
+from ..errors.unprocessable_entity_error import UnprocessableEntityError
+from json.decoder import JSONDecodeError
+from ..core.api_error import ApiError
 from ..types.workflow_run_response import WorkflowRunResponse
+from .types.agent_get_run_response import AgentGetRunResponse
+from ..core.jsonable_encoder import jsonable_encoder
+from ..errors.not_found_error import NotFoundError
 from ..core.client_wrapper import AsyncClientWrapper
 
 # this is used as the default value for optional parameters
@@ -28,251 +27,14 @@ class AgentClient:
     def __init__(self, *, client_wrapper: SyncClientWrapper):
         self._client_wrapper = client_wrapper
 
-    def get_run(self, run_id: str, *, request_options: typing.Optional[RequestOptions] = None) -> AgentGetRunResponse:
-        """
-        Get a task or a workflow run by id
-
-        Parameters
-        ----------
-        run_id : str
-            The id of the task run or the workflow run.
-
-        request_options : typing.Optional[RequestOptions]
-            Request-specific configuration.
-
-        Returns
-        -------
-        AgentGetRunResponse
-            Successfully got run
-
-        Examples
-        --------
-        from skyvern import Skyvern
-
-        client = Skyvern(
-            api_key="YOUR_API_KEY",
-            authorization="YOUR_AUTHORIZATION",
-        )
-        client.agent.get_run(
-            run_id="run_id",
-        )
-        """
-        _response = self._client_wrapper.httpx_client.request(
-            f"v1/runs/{jsonable_encoder(run_id)}",
-            method="GET",
-            request_options=request_options,
-        )
-        try:
-            if 200 <= _response.status_code < 300:
-                return typing.cast(
-                    AgentGetRunResponse,
-                    parse_obj_as(
-                        type_=AgentGetRunResponse,  # type: ignore
-                        object_=_response.json(),
-                    ),
-                )
-            if _response.status_code == 404:
-                raise NotFoundError(
-                    typing.cast(
-                        typing.Optional[typing.Any],
-                        parse_obj_as(
-                            type_=typing.Optional[typing.Any],  # type: ignore
-                            object_=_response.json(),
-                        ),
-                    )
-                )
-            if _response.status_code == 422:
-                raise UnprocessableEntityError(
-                    typing.cast(
-                        typing.Optional[typing.Any],
-                        parse_obj_as(
-                            type_=typing.Optional[typing.Any],  # type: ignore
-                            object_=_response.json(),
-                        ),
-                    )
-                )
-            _response_json = _response.json()
-        except JSONDecodeError:
-            raise ApiError(status_code=_response.status_code, body=_response.text)
-        raise ApiError(status_code=_response.status_code, body=_response_json)
-
-    def create_workflow(self, *, request_options: typing.Optional[RequestOptions] = None) -> Workflow:
-        """
-        Create a new workflow
-
-        Parameters
-        ----------
-        request_options : typing.Optional[RequestOptions]
-            Request-specific configuration.
-
-        Returns
-        -------
-        Workflow
-            Successfully created workflow
-
-        Examples
-        --------
-        from skyvern import Skyvern
-
-        client = Skyvern(
-            api_key="YOUR_API_KEY",
-            authorization="YOUR_AUTHORIZATION",
-        )
-        client.agent.create_workflow()
-        """
-        _response = self._client_wrapper.httpx_client.request(
-            "v1/workflows",
-            method="POST",
-            request_options=request_options,
-        )
-        try:
-            if 200 <= _response.status_code < 300:
-                return typing.cast(
-                    Workflow,
-                    parse_obj_as(
-                        type_=Workflow,  # type: ignore
-                        object_=_response.json(),
-                    ),
-                )
-            if _response.status_code == 422:
-                raise UnprocessableEntityError(
-                    typing.cast(
-                        typing.Optional[typing.Any],
-                        parse_obj_as(
-                            type_=typing.Optional[typing.Any],  # type: ignore
-                            object_=_response.json(),
-                        ),
-                    )
-                )
-            _response_json = _response.json()
-        except JSONDecodeError:
-            raise ApiError(status_code=_response.status_code, body=_response.text)
-        raise ApiError(status_code=_response.status_code, body=_response_json)
-
-    def update_workflow(self, workflow_id: str, *, request_options: typing.Optional[RequestOptions] = None) -> Workflow:
-        """
-        Update a workflow definition
-
-        Parameters
-        ----------
-        workflow_id : str
-
-        request_options : typing.Optional[RequestOptions]
-            Request-specific configuration.
-
-        Returns
-        -------
-        Workflow
-            Successfully updated workflow
-
-        Examples
-        --------
-        from skyvern import Skyvern
-
-        client = Skyvern(
-            api_key="YOUR_API_KEY",
-            authorization="YOUR_AUTHORIZATION",
-        )
-        client.agent.update_workflow(
-            workflow_id="workflow_id",
-        )
-        """
-        _response = self._client_wrapper.httpx_client.request(
-            f"v1/workflows/{jsonable_encoder(workflow_id)}",
-            method="POST",
-            request_options=request_options,
-        )
-        try:
-            if 200 <= _response.status_code < 300:
-                return typing.cast(
-                    Workflow,
-                    parse_obj_as(
-                        type_=Workflow,  # type: ignore
-                        object_=_response.json(),
-                    ),
-                )
-            if _response.status_code == 422:
-                raise UnprocessableEntityError(
-                    typing.cast(
-                        typing.Optional[typing.Any],
-                        parse_obj_as(
-                            type_=typing.Optional[typing.Any],  # type: ignore
-                            object_=_response.json(),
-                        ),
-                    )
-                )
-            _response_json = _response.json()
-        except JSONDecodeError:
-            raise ApiError(status_code=_response.status_code, body=_response.text)
-        raise ApiError(status_code=_response.status_code, body=_response_json)
-
-    def delete_workflow(
-        self, workflow_id: str, *, request_options: typing.Optional[RequestOptions] = None
-    ) -> typing.Optional[typing.Any]:
-        """
-        Delete a workflow
-
-        Parameters
-        ----------
-        workflow_id : str
-
-        request_options : typing.Optional[RequestOptions]
-            Request-specific configuration.
-
-        Returns
-        -------
-        typing.Optional[typing.Any]
-            Successfully deleted workflow
-
-        Examples
-        --------
-        from skyvern import Skyvern
-
-        client = Skyvern(
-            api_key="YOUR_API_KEY",
-            authorization="YOUR_AUTHORIZATION",
-        )
-        client.agent.delete_workflow(
-            workflow_id="workflow_id",
-        )
-        """
-        _response = self._client_wrapper.httpx_client.request(
-            f"v1/workflows/{jsonable_encoder(workflow_id)}/delete",
-            method="POST",
-            request_options=request_options,
-        )
-        try:
-            if 200 <= _response.status_code < 300:
-                return typing.cast(
-                    typing.Optional[typing.Any],
-                    parse_obj_as(
-                        type_=typing.Optional[typing.Any],  # type: ignore
-                        object_=_response.json(),
-                    ),
-                )
-            if _response.status_code == 422:
-                raise UnprocessableEntityError(
-                    typing.cast(
-                        typing.Optional[typing.Any],
-                        parse_obj_as(
-                            type_=typing.Optional[typing.Any],  # type: ignore
-                            object_=_response.json(),
-                        ),
-                    )
-                )
-            _response_json = _response.json()
-        except JSONDecodeError:
-            raise ApiError(status_code=_response.status_code, body=_response.text)
-        raise ApiError(status_code=_response.status_code, body=_response_json)
-
     def run_task(
         self,
         *,
         prompt: str,
         user_agent: typing.Optional[str] = None,
         url: typing.Optional[str] = OMIT,
-        title: typing.Optional[str] = OMIT,
         engine: typing.Optional[RunEngine] = OMIT,
+        title: typing.Optional[str] = OMIT,
         proxy_location: typing.Optional[ProxyLocation] = OMIT,
         data_extraction_schema: typing.Optional[TaskRunRequestDataExtractionSchema] = OMIT,
         error_code_mapping: typing.Optional[typing.Dict[str, typing.Optional[str]]] = OMIT,
@@ -282,6 +44,7 @@ class AgentClient:
         totp_url: typing.Optional[str] = OMIT,
         browser_session_id: typing.Optional[str] = OMIT,
         publish_workflow: typing.Optional[bool] = OMIT,
+        include_action_history_in_verification: typing.Optional[bool] = OMIT,
         request_options: typing.Optional[RequestOptions] = None,
     ) -> TaskRunResponse:
         """
@@ -297,11 +60,11 @@ class AgentClient:
         url : typing.Optional[str]
             The starting URL for the task. If not provided, Skyvern will attempt to determine an appropriate URL
 
-        title : typing.Optional[str]
-            Optional title for the task
-
         engine : typing.Optional[RunEngine]
-            The Skyvern engine version to use for this task
+            The Skyvern engine version to use for this task. The default value is skyvern-2.0.
+
+        title : typing.Optional[str]
+            The title for the task
 
         proxy_location : typing.Optional[ProxyLocation]
             Geographic Proxy location to route the browser traffic through
@@ -328,7 +91,10 @@ class AgentClient:
             ID of an existing browser session to reuse, having it continue from the current screen state
 
         publish_workflow : typing.Optional[bool]
-            Whether to publish this task as a reusable workflow.
+            Whether to publish this task as a reusable workflow. Only available for skyvern-2.0.
+
+        include_action_history_in_verification : typing.Optional[bool]
+            Whether to include action history when verifying that the task is complete
 
         request_options : typing.Optional[RequestOptions]
             Request-specific configuration.
@@ -344,7 +110,6 @@ class AgentClient:
 
         client = Skyvern(
             api_key="YOUR_API_KEY",
-            authorization="YOUR_AUTHORIZATION",
         )
         client.agent.run_task(
             prompt="prompt",
@@ -356,8 +121,8 @@ class AgentClient:
             json={
                 "prompt": prompt,
                 "url": url,
-                "title": title,
                 "engine": engine,
+                "title": title,
                 "proxy_location": proxy_location,
                 "data_extraction_schema": convert_and_respect_annotation_metadata(
                     object_=data_extraction_schema, annotation=TaskRunRequestDataExtractionSchema, direction="write"
@@ -369,6 +134,7 @@ class AgentClient:
                 "totp_url": totp_url,
                 "browser_session_id": browser_session_id,
                 "publish_workflow": publish_workflow,
+                "include_action_history_in_verification": include_action_history_in_verification,
             },
             headers={
                 "x-user-agent": str(user_agent) if user_agent is not None else None,
@@ -417,8 +183,8 @@ class AgentClient:
         template: typing.Optional[bool] = None,
         max_steps_override: typing.Optional[int] = None,
         user_agent: typing.Optional[str] = None,
-        title: typing.Optional[str] = OMIT,
         parameters: typing.Optional[typing.Dict[str, typing.Optional[typing.Any]]] = OMIT,
+        title: typing.Optional[str] = OMIT,
         proxy_location: typing.Optional[ProxyLocation] = OMIT,
         webhook_url: typing.Optional[str] = OMIT,
         totp_url: typing.Optional[str] = OMIT,
@@ -432,7 +198,7 @@ class AgentClient:
         Parameters
         ----------
         workflow_id : str
-            ID of the workflow to run
+            ID of the workflow to run. Workflow ID starts with `wpid_`.
 
         template : typing.Optional[bool]
 
@@ -440,26 +206,26 @@ class AgentClient:
 
         user_agent : typing.Optional[str]
 
-        title : typing.Optional[str]
-            Optional title for this workflow run
-
         parameters : typing.Optional[typing.Dict[str, typing.Optional[typing.Any]]]
             Parameters to pass to the workflow
+
+        title : typing.Optional[str]
+            The title for this workflow run
 
         proxy_location : typing.Optional[ProxyLocation]
             Location of proxy to use for this workflow run
 
         webhook_url : typing.Optional[str]
-            URL to send workflow status updates to after a run is finished
+            URL to send workflow status updates to after a run is finished. Refer to https://docs.skyvern.com/running-tasks/webhooks-faq for webhook questions.
 
         totp_url : typing.Optional[str]
-            URL for TOTP authentication setup if Skyvern should be polling endpoint for 2FA codes
+            URL that serves TOTP/2FA/MFA codes for Skyvern to use during the workflow run. Refer to https://docs.skyvern.com/running-tasks/advanced-features#get-code-from-your-endpoint
 
         totp_identifier : typing.Optional[str]
-            Identifier for TOTP (Time-based One-Time Password) authentication if codes are being pushed to Skyvern
+            Identifier for the TOTP/2FA/MFA code when the code is pushed to Skyvern. Refer to https://docs.skyvern.com/running-tasks/advanced-features#time-based-one-time-password-totp
 
         browser_session_id : typing.Optional[str]
-            ID of an existing browser session to reuse, having it continue from the current screen state
+            ID of a Skyvern browser session to reuse, having it continue from the current screen state
 
         request_options : typing.Optional[RequestOptions]
             Request-specific configuration.
@@ -475,10 +241,9 @@ class AgentClient:
 
         client = Skyvern(
             api_key="YOUR_API_KEY",
-            authorization="YOUR_AUTHORIZATION",
         )
         client.agent.run_workflow(
-            workflow_id="workflow_id",
+            workflow_id="wpid_123",
         )
         """
         _response = self._client_wrapper.httpx_client.request(
@@ -489,8 +254,8 @@ class AgentClient:
             },
             json={
                 "workflow_id": workflow_id,
-                "title": title,
                 "parameters": parameters,
+                "title": title,
                 "proxy_location": proxy_location,
                 "webhook_url": webhook_url,
                 "totp_url": totp_url,
@@ -538,11 +303,78 @@ class AgentClient:
             raise ApiError(status_code=_response.status_code, body=_response.text)
         raise ApiError(status_code=_response.status_code, body=_response_json)
 
+    def get_run(self, run_id: str, *, request_options: typing.Optional[RequestOptions] = None) -> AgentGetRunResponse:
+        """
+        Get run information (task run, workflow run)
+
+        Parameters
+        ----------
+        run_id : str
+            The id of the task run or the workflow run.
+
+        request_options : typing.Optional[RequestOptions]
+            Request-specific configuration.
+
+        Returns
+        -------
+        AgentGetRunResponse
+            Successfully got run
+
+        Examples
+        --------
+        from skyvern import Skyvern
+
+        client = Skyvern(
+            api_key="YOUR_API_KEY",
+        )
+        client.agent.get_run(
+            run_id="tsk_123",
+        )
+        """
+        _response = self._client_wrapper.httpx_client.request(
+            f"v1/runs/{jsonable_encoder(run_id)}",
+            method="GET",
+            request_options=request_options,
+        )
+        try:
+            if 200 <= _response.status_code < 300:
+                return typing.cast(
+                    AgentGetRunResponse,
+                    parse_obj_as(
+                        type_=AgentGetRunResponse,  # type: ignore
+                        object_=_response.json(),
+                    ),
+                )
+            if _response.status_code == 404:
+                raise NotFoundError(
+                    typing.cast(
+                        typing.Optional[typing.Any],
+                        parse_obj_as(
+                            type_=typing.Optional[typing.Any],  # type: ignore
+                            object_=_response.json(),
+                        ),
+                    )
+                )
+            if _response.status_code == 422:
+                raise UnprocessableEntityError(
+                    typing.cast(
+                        typing.Optional[typing.Any],
+                        parse_obj_as(
+                            type_=typing.Optional[typing.Any],  # type: ignore
+                            object_=_response.json(),
+                        ),
+                    )
+                )
+            _response_json = _response.json()
+        except JSONDecodeError:
+            raise ApiError(status_code=_response.status_code, body=_response.text)
+        raise ApiError(status_code=_response.status_code, body=_response_json)
+
     def cancel_run(
         self, run_id: str, *, request_options: typing.Optional[RequestOptions] = None
     ) -> typing.Optional[typing.Any]:
         """
-        Cancel a task or workflow run
+        Cancel a run (task or workflow)
 
         Parameters
         ----------
@@ -563,7 +395,6 @@ class AgentClient:
 
         client = Skyvern(
             api_key="YOUR_API_KEY",
-            authorization="YOUR_AUTHORIZATION",
         )
         client.agent.cancel_run(
             run_id="run_id",
@@ -603,287 +434,14 @@ class AsyncAgentClient:
     def __init__(self, *, client_wrapper: AsyncClientWrapper):
         self._client_wrapper = client_wrapper
 
-    async def get_run(
-        self, run_id: str, *, request_options: typing.Optional[RequestOptions] = None
-    ) -> AgentGetRunResponse:
-        """
-        Get a task or a workflow run by id
-
-        Parameters
-        ----------
-        run_id : str
-            The id of the task run or the workflow run.
-
-        request_options : typing.Optional[RequestOptions]
-            Request-specific configuration.
-
-        Returns
-        -------
-        AgentGetRunResponse
-            Successfully got run
-
-        Examples
-        --------
-        import asyncio
-
-        from skyvern import AsyncSkyvern
-
-        client = AsyncSkyvern(
-            api_key="YOUR_API_KEY",
-            authorization="YOUR_AUTHORIZATION",
-        )
-
-
-        async def main() -> None:
-            await client.agent.get_run(
-                run_id="run_id",
-            )
-
-
-        asyncio.run(main())
-        """
-        _response = await self._client_wrapper.httpx_client.request(
-            f"v1/runs/{jsonable_encoder(run_id)}",
-            method="GET",
-            request_options=request_options,
-        )
-        try:
-            if 200 <= _response.status_code < 300:
-                return typing.cast(
-                    AgentGetRunResponse,
-                    parse_obj_as(
-                        type_=AgentGetRunResponse,  # type: ignore
-                        object_=_response.json(),
-                    ),
-                )
-            if _response.status_code == 404:
-                raise NotFoundError(
-                    typing.cast(
-                        typing.Optional[typing.Any],
-                        parse_obj_as(
-                            type_=typing.Optional[typing.Any],  # type: ignore
-                            object_=_response.json(),
-                        ),
-                    )
-                )
-            if _response.status_code == 422:
-                raise UnprocessableEntityError(
-                    typing.cast(
-                        typing.Optional[typing.Any],
-                        parse_obj_as(
-                            type_=typing.Optional[typing.Any],  # type: ignore
-                            object_=_response.json(),
-                        ),
-                    )
-                )
-            _response_json = _response.json()
-        except JSONDecodeError:
-            raise ApiError(status_code=_response.status_code, body=_response.text)
-        raise ApiError(status_code=_response.status_code, body=_response_json)
-
-    async def create_workflow(self, *, request_options: typing.Optional[RequestOptions] = None) -> Workflow:
-        """
-        Create a new workflow
-
-        Parameters
-        ----------
-        request_options : typing.Optional[RequestOptions]
-            Request-specific configuration.
-
-        Returns
-        -------
-        Workflow
-            Successfully created workflow
-
-        Examples
-        --------
-        import asyncio
-
-        from skyvern import AsyncSkyvern
-
-        client = AsyncSkyvern(
-            api_key="YOUR_API_KEY",
-            authorization="YOUR_AUTHORIZATION",
-        )
-
-
-        async def main() -> None:
-            await client.agent.create_workflow()
-
-
-        asyncio.run(main())
-        """
-        _response = await self._client_wrapper.httpx_client.request(
-            "v1/workflows",
-            method="POST",
-            request_options=request_options,
-        )
-        try:
-            if 200 <= _response.status_code < 300:
-                return typing.cast(
-                    Workflow,
-                    parse_obj_as(
-                        type_=Workflow,  # type: ignore
-                        object_=_response.json(),
-                    ),
-                )
-            if _response.status_code == 422:
-                raise UnprocessableEntityError(
-                    typing.cast(
-                        typing.Optional[typing.Any],
-                        parse_obj_as(
-                            type_=typing.Optional[typing.Any],  # type: ignore
-                            object_=_response.json(),
-                        ),
-                    )
-                )
-            _response_json = _response.json()
-        except JSONDecodeError:
-            raise ApiError(status_code=_response.status_code, body=_response.text)
-        raise ApiError(status_code=_response.status_code, body=_response_json)
-
-    async def update_workflow(
-        self, workflow_id: str, *, request_options: typing.Optional[RequestOptions] = None
-    ) -> Workflow:
-        """
-        Update a workflow definition
-
-        Parameters
-        ----------
-        workflow_id : str
-
-        request_options : typing.Optional[RequestOptions]
-            Request-specific configuration.
-
-        Returns
-        -------
-        Workflow
-            Successfully updated workflow
-
-        Examples
-        --------
-        import asyncio
-
-        from skyvern import AsyncSkyvern
-
-        client = AsyncSkyvern(
-            api_key="YOUR_API_KEY",
-            authorization="YOUR_AUTHORIZATION",
-        )
-
-
-        async def main() -> None:
-            await client.agent.update_workflow(
-                workflow_id="workflow_id",
-            )
-
-
-        asyncio.run(main())
-        """
-        _response = await self._client_wrapper.httpx_client.request(
-            f"v1/workflows/{jsonable_encoder(workflow_id)}",
-            method="POST",
-            request_options=request_options,
-        )
-        try:
-            if 200 <= _response.status_code < 300:
-                return typing.cast(
-                    Workflow,
-                    parse_obj_as(
-                        type_=Workflow,  # type: ignore
-                        object_=_response.json(),
-                    ),
-                )
-            if _response.status_code == 422:
-                raise UnprocessableEntityError(
-                    typing.cast(
-                        typing.Optional[typing.Any],
-                        parse_obj_as(
-                            type_=typing.Optional[typing.Any],  # type: ignore
-                            object_=_response.json(),
-                        ),
-                    )
-                )
-            _response_json = _response.json()
-        except JSONDecodeError:
-            raise ApiError(status_code=_response.status_code, body=_response.text)
-        raise ApiError(status_code=_response.status_code, body=_response_json)
-
-    async def delete_workflow(
-        self, workflow_id: str, *, request_options: typing.Optional[RequestOptions] = None
-    ) -> typing.Optional[typing.Any]:
-        """
-        Delete a workflow
-
-        Parameters
-        ----------
-        workflow_id : str
-
-        request_options : typing.Optional[RequestOptions]
-            Request-specific configuration.
-
-        Returns
-        -------
-        typing.Optional[typing.Any]
-            Successfully deleted workflow
-
-        Examples
-        --------
-        import asyncio
-
-        from skyvern import AsyncSkyvern
-
-        client = AsyncSkyvern(
-            api_key="YOUR_API_KEY",
-            authorization="YOUR_AUTHORIZATION",
-        )
-
-
-        async def main() -> None:
-            await client.agent.delete_workflow(
-                workflow_id="workflow_id",
-            )
-
-
-        asyncio.run(main())
-        """
-        _response = await self._client_wrapper.httpx_client.request(
-            f"v1/workflows/{jsonable_encoder(workflow_id)}/delete",
-            method="POST",
-            request_options=request_options,
-        )
-        try:
-            if 200 <= _response.status_code < 300:
-                return typing.cast(
-                    typing.Optional[typing.Any],
-                    parse_obj_as(
-                        type_=typing.Optional[typing.Any],  # type: ignore
-                        object_=_response.json(),
-                    ),
-                )
-            if _response.status_code == 422:
-                raise UnprocessableEntityError(
-                    typing.cast(
-                        typing.Optional[typing.Any],
-                        parse_obj_as(
-                            type_=typing.Optional[typing.Any],  # type: ignore
-                            object_=_response.json(),
-                        ),
-                    )
-                )
-            _response_json = _response.json()
-        except JSONDecodeError:
-            raise ApiError(status_code=_response.status_code, body=_response.text)
-        raise ApiError(status_code=_response.status_code, body=_response_json)
-
     async def run_task(
         self,
         *,
         prompt: str,
         user_agent: typing.Optional[str] = None,
         url: typing.Optional[str] = OMIT,
-        title: typing.Optional[str] = OMIT,
         engine: typing.Optional[RunEngine] = OMIT,
+        title: typing.Optional[str] = OMIT,
         proxy_location: typing.Optional[ProxyLocation] = OMIT,
         data_extraction_schema: typing.Optional[TaskRunRequestDataExtractionSchema] = OMIT,
         error_code_mapping: typing.Optional[typing.Dict[str, typing.Optional[str]]] = OMIT,
@@ -893,6 +451,7 @@ class AsyncAgentClient:
         totp_url: typing.Optional[str] = OMIT,
         browser_session_id: typing.Optional[str] = OMIT,
         publish_workflow: typing.Optional[bool] = OMIT,
+        include_action_history_in_verification: typing.Optional[bool] = OMIT,
         request_options: typing.Optional[RequestOptions] = None,
     ) -> TaskRunResponse:
         """
@@ -908,11 +467,11 @@ class AsyncAgentClient:
         url : typing.Optional[str]
             The starting URL for the task. If not provided, Skyvern will attempt to determine an appropriate URL
 
-        title : typing.Optional[str]
-            Optional title for the task
-
         engine : typing.Optional[RunEngine]
-            The Skyvern engine version to use for this task
+            The Skyvern engine version to use for this task. The default value is skyvern-2.0.
+
+        title : typing.Optional[str]
+            The title for the task
 
         proxy_location : typing.Optional[ProxyLocation]
             Geographic Proxy location to route the browser traffic through
@@ -939,7 +498,10 @@ class AsyncAgentClient:
             ID of an existing browser session to reuse, having it continue from the current screen state
 
         publish_workflow : typing.Optional[bool]
-            Whether to publish this task as a reusable workflow.
+            Whether to publish this task as a reusable workflow. Only available for skyvern-2.0.
+
+        include_action_history_in_verification : typing.Optional[bool]
+            Whether to include action history when verifying that the task is complete
 
         request_options : typing.Optional[RequestOptions]
             Request-specific configuration.
@@ -957,7 +519,6 @@ class AsyncAgentClient:
 
         client = AsyncSkyvern(
             api_key="YOUR_API_KEY",
-            authorization="YOUR_AUTHORIZATION",
         )
 
 
@@ -975,8 +536,8 @@ class AsyncAgentClient:
             json={
                 "prompt": prompt,
                 "url": url,
-                "title": title,
                 "engine": engine,
+                "title": title,
                 "proxy_location": proxy_location,
                 "data_extraction_schema": convert_and_respect_annotation_metadata(
                     object_=data_extraction_schema, annotation=TaskRunRequestDataExtractionSchema, direction="write"
@@ -988,6 +549,7 @@ class AsyncAgentClient:
                 "totp_url": totp_url,
                 "browser_session_id": browser_session_id,
                 "publish_workflow": publish_workflow,
+                "include_action_history_in_verification": include_action_history_in_verification,
             },
             headers={
                 "x-user-agent": str(user_agent) if user_agent is not None else None,
@@ -1036,8 +598,8 @@ class AsyncAgentClient:
         template: typing.Optional[bool] = None,
         max_steps_override: typing.Optional[int] = None,
         user_agent: typing.Optional[str] = None,
-        title: typing.Optional[str] = OMIT,
         parameters: typing.Optional[typing.Dict[str, typing.Optional[typing.Any]]] = OMIT,
+        title: typing.Optional[str] = OMIT,
         proxy_location: typing.Optional[ProxyLocation] = OMIT,
         webhook_url: typing.Optional[str] = OMIT,
         totp_url: typing.Optional[str] = OMIT,
@@ -1051,7 +613,7 @@ class AsyncAgentClient:
         Parameters
         ----------
         workflow_id : str
-            ID of the workflow to run
+            ID of the workflow to run. Workflow ID starts with `wpid_`.
 
         template : typing.Optional[bool]
 
@@ -1059,26 +621,26 @@ class AsyncAgentClient:
 
         user_agent : typing.Optional[str]
 
-        title : typing.Optional[str]
-            Optional title for this workflow run
-
         parameters : typing.Optional[typing.Dict[str, typing.Optional[typing.Any]]]
             Parameters to pass to the workflow
+
+        title : typing.Optional[str]
+            The title for this workflow run
 
         proxy_location : typing.Optional[ProxyLocation]
             Location of proxy to use for this workflow run
 
         webhook_url : typing.Optional[str]
-            URL to send workflow status updates to after a run is finished
+            URL to send workflow status updates to after a run is finished. Refer to https://docs.skyvern.com/running-tasks/webhooks-faq for webhook questions.
 
         totp_url : typing.Optional[str]
-            URL for TOTP authentication setup if Skyvern should be polling endpoint for 2FA codes
+            URL that serves TOTP/2FA/MFA codes for Skyvern to use during the workflow run. Refer to https://docs.skyvern.com/running-tasks/advanced-features#get-code-from-your-endpoint
 
         totp_identifier : typing.Optional[str]
-            Identifier for TOTP (Time-based One-Time Password) authentication if codes are being pushed to Skyvern
+            Identifier for the TOTP/2FA/MFA code when the code is pushed to Skyvern. Refer to https://docs.skyvern.com/running-tasks/advanced-features#time-based-one-time-password-totp
 
         browser_session_id : typing.Optional[str]
-            ID of an existing browser session to reuse, having it continue from the current screen state
+            ID of a Skyvern browser session to reuse, having it continue from the current screen state
 
         request_options : typing.Optional[RequestOptions]
             Request-specific configuration.
@@ -1096,13 +658,12 @@ class AsyncAgentClient:
 
         client = AsyncSkyvern(
             api_key="YOUR_API_KEY",
-            authorization="YOUR_AUTHORIZATION",
         )
 
 
         async def main() -> None:
             await client.agent.run_workflow(
-                workflow_id="workflow_id",
+                workflow_id="wpid_123",
             )
 
 
@@ -1116,8 +677,8 @@ class AsyncAgentClient:
             },
             json={
                 "workflow_id": workflow_id,
-                "title": title,
                 "parameters": parameters,
+                "title": title,
                 "proxy_location": proxy_location,
                 "webhook_url": webhook_url,
                 "totp_url": totp_url,
@@ -1165,11 +726,88 @@ class AsyncAgentClient:
             raise ApiError(status_code=_response.status_code, body=_response.text)
         raise ApiError(status_code=_response.status_code, body=_response_json)
 
+    async def get_run(
+        self, run_id: str, *, request_options: typing.Optional[RequestOptions] = None
+    ) -> AgentGetRunResponse:
+        """
+        Get run information (task run, workflow run)
+
+        Parameters
+        ----------
+        run_id : str
+            The id of the task run or the workflow run.
+
+        request_options : typing.Optional[RequestOptions]
+            Request-specific configuration.
+
+        Returns
+        -------
+        AgentGetRunResponse
+            Successfully got run
+
+        Examples
+        --------
+        import asyncio
+
+        from skyvern import AsyncSkyvern
+
+        client = AsyncSkyvern(
+            api_key="YOUR_API_KEY",
+        )
+
+
+        async def main() -> None:
+            await client.agent.get_run(
+                run_id="tsk_123",
+            )
+
+
+        asyncio.run(main())
+        """
+        _response = await self._client_wrapper.httpx_client.request(
+            f"v1/runs/{jsonable_encoder(run_id)}",
+            method="GET",
+            request_options=request_options,
+        )
+        try:
+            if 200 <= _response.status_code < 300:
+                return typing.cast(
+                    AgentGetRunResponse,
+                    parse_obj_as(
+                        type_=AgentGetRunResponse,  # type: ignore
+                        object_=_response.json(),
+                    ),
+                )
+            if _response.status_code == 404:
+                raise NotFoundError(
+                    typing.cast(
+                        typing.Optional[typing.Any],
+                        parse_obj_as(
+                            type_=typing.Optional[typing.Any],  # type: ignore
+                            object_=_response.json(),
+                        ),
+                    )
+                )
+            if _response.status_code == 422:
+                raise UnprocessableEntityError(
+                    typing.cast(
+                        typing.Optional[typing.Any],
+                        parse_obj_as(
+                            type_=typing.Optional[typing.Any],  # type: ignore
+                            object_=_response.json(),
+                        ),
+                    )
+                )
+            _response_json = _response.json()
+        except JSONDecodeError:
+            raise ApiError(status_code=_response.status_code, body=_response.text)
+        raise ApiError(status_code=_response.status_code, body=_response_json)
+
     async def cancel_run(
         self, run_id: str, *, request_options: typing.Optional[RequestOptions] = None
     ) -> typing.Optional[typing.Any]:
         """
-        Cancel a task or workflow run
+        Cancel a run (task or workflow)
 
         Parameters
         ----------
@@ -1192,7 +830,6 @@ class AsyncAgentClient:
 
         client = AsyncSkyvern(
             api_key="YOUR_API_KEY",
-            authorization="YOUR_AUTHORIZATION",
         )
 
 
