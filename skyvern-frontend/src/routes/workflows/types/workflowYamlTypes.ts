@@ -1,4 +1,6 @@
+import { RunEngine } from "@/api/types";
 import { WorkflowBlockType } from "./workflowTypes";
+import { WorkflowModel } from "./workflowTypes";
 
 export type WorkflowCreateYAMLRequest = {
   title: string;
@@ -6,6 +8,7 @@ export type WorkflowCreateYAMLRequest = {
   proxy_location?: string | null;
   webhook_callback_url?: string | null;
   persist_browser_session?: boolean;
+  model?: WorkflowModel | null;
   totp_verification_url?: string | null;
   workflow_definition: WorkflowDefinitionYAML;
   is_saved_task?: boolean;
@@ -134,6 +137,8 @@ export type TaskBlockYAML = BlockYAMLBase & {
   cache_actions: boolean;
   complete_criterion: string | null;
   terminate_criterion: string | null;
+  include_action_history_in_verification: boolean;
+  engine: RunEngine | null;
 };
 
 export type Taskv2BlockYAML = BlockYAMLBase & {
@@ -166,6 +171,7 @@ export type ActionBlockYAML = BlockYAMLBase & {
   totp_verification_url?: string | null;
   totp_identifier?: string | null;
   cache_actions: boolean;
+  engine: RunEngine | null;
 };
 
 export type NavigationBlockYAML = BlockYAMLBase & {
@@ -184,6 +190,9 @@ export type NavigationBlockYAML = BlockYAMLBase & {
   cache_actions: boolean;
   complete_criterion: string | null;
   terminate_criterion: string | null;
+  engine: RunEngine | null;
+  model: WorkflowModel | null;
+  include_action_history_in_verification: boolean;
 };
 
 export type ExtractionBlockYAML = BlockYAMLBase & {
@@ -196,6 +205,7 @@ export type ExtractionBlockYAML = BlockYAMLBase & {
   max_steps_per_run?: number | null;
   parameter_keys?: Array<string> | null;
   cache_actions: boolean;
+  engine: RunEngine | null;
 };
 
 export type LoginBlockYAML = BlockYAMLBase & {
@@ -212,6 +222,7 @@ export type LoginBlockYAML = BlockYAMLBase & {
   cache_actions: boolean;
   complete_criterion: string | null;
   terminate_criterion: string | null;
+  engine: RunEngine | null;
 };
 
 export type WaitBlockYAML = BlockYAMLBase & {
@@ -232,6 +243,7 @@ export type FileDownloadBlockYAML = BlockYAMLBase & {
   totp_verification_url?: string | null;
   totp_identifier?: string | null;
   cache_actions: boolean;
+  engine: RunEngine | null;
 };
 
 export type CodeBlockYAML = BlockYAMLBase & {

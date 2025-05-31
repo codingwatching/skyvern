@@ -24,8 +24,13 @@ ALGORITHM = "HS256"
 
 
 async def get_current_org(
-    x_api_key: Annotated[str | None, Header()] = None,
-    authorization: Annotated[str | None, Header()] = None,
+    x_api_key: Annotated[
+        str | None,
+        Header(
+            description="Skyvern API key for authentication. API key can be found at https://app.skyvern.com/settings."
+        ),
+    ] = None,
+    authorization: Annotated[str | None, Header(include_in_schema=False)] = None,
 ) -> Organization:
     if not x_api_key and not authorization:
         raise HTTPException(

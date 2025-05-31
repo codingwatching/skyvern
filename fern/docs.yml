@@ -17,6 +17,11 @@ colors:
 analytics:
   posthog:
     api-key: ${POSTHOG_API_KEY}
+layout:
+  page-width: 1504px
+  header-height: 75px
+  searchbar-placement: header
+  tabs-placement: header
 navbar-links:
   - type: minimal
     icon: fa-brands fa-discord
@@ -40,8 +45,8 @@ tabs:
     href: https://blog.skyvern.com
   community:
     display-name: Community 
-    icon: discord
-    href: https://discord.gg/fG2XXEuQX3
+    icon: fa-brands fa-discord
+    href: https://discord.gg/m6FmQV7nU3
   github:
     display-name: Github
     icon: fa-brands fa-github
@@ -61,44 +66,78 @@ navigation:
       contents:
         - page: Introduction
           path: introduction.mdx
+        - page: Quickstart
+          path: getting-started/quickstart.mdx
         - page: Skyvern In Action
           path: getting-started/skyvern-in-action.mdx
         - page: Task Prompting Guide
           path: getting-started/prompting-guide.mdx
     - section: Tasks
       contents:
-        - page: Introduction
-          path: running-tasks/introduction.mdx
-        - page: Tasks API
-          path: running-tasks/api-spec.mdx
-        - api: Endpoints
-          paginated: true
-          snippets: 
-            python: skyvern
-        - page: Webhooks FAQ
-          path: running-tasks/webhooks-faq.mdx
+        - page: Run Tasks
+          path: running-tasks/run-tasks.mdx
         - page: Visualizing Results
           path: running-tasks/visualizing-results.mdx
+        - page: Cancel Task Runs
+          path: running-tasks/cancel-runs.mdx
+        - page: Webhooks FAQ
+          path: running-tasks/webhooks-faq.mdx
         - page: Advanced Settings for tasks
+          hidden: true
           path: running-tasks/advanced-features.mdx
-    - section: Workflows (Beta)
+        - page: Legacy Task APIs
+          hidden: true
+          path: running-tasks/api-spec.mdx
+    - section: Workflows
       contents:
-        - page: Introduction
-          path: workflows/introduction.mdx
-        - page: Creating Workflows
-          path: workflows/creating-workflows.mdx
-        - page: Getting Existing Workflows
-          path: workflows/getting-workflows.mdx
+        - page: Manage Workflows
+          path: workflows/manage-workflows.mdx
+        - page: Workflow Blocks
+          path: workflows/workflow-blocks-details.mdx
+        - page: Workflow Parameters
+          path: workflows/workflow-parameters.mdx
+        - page: Run Workflows
+          path: workflows/run-workflows.mdx
+        - page: Consistency and Reliability
+          path: workflows/consistent-workflows.mdx
         - page: Running Workflows
           path: workflows/running-workflows.mdx
+          hidden: true
+        - page: Introduction
+          path: workflows/introduction.mdx
+          hidden: true
         - page: Workflow Blocks
           path: workflows/workflow-blocks.mdx
+          hidden: true
+        - page: Creating Workflows
+          path: workflows/creating-workflows.mdx
+          hidden: true
+        - page: Getting Existing Workflows
+          path: workflows/getting-workflows.mdx
+          hidden: true
         - page: What the heck is a parameter?
           path: workflows/what-is-a-parameter.mdx
+          hidden: true
+    - section: Credentials
+      contents:
+        - page: Overview
+          path: credentials/introduction.mdx
+        - page: Password Management
+          path: credentials/passwords.mdx
+        - page: Credit Card Management
+          path: credentials/credit-cards.mdx
+        - page: 2FA Support (TOTP)
+          path: credentials/totp.mdx
+        - page: Bitwarden
+          path: credentials/bitwarden.mdx
+    - section: Browser Sessions (Beta)
+      contents:
+        - page: Introduction
+          path: browser-sessions/introduction.mdx
     - section: Integrations
       contents:
-        - page: API Integrations
-          path: integrations/api.mdx
+        - page: Skyvern MCP
+          path: integrations/mcp.mdx
         - page: Zapier
           path: integrations/zapier.mdx
         - page: Make
@@ -113,6 +152,10 @@ navigation:
         snippets:
           python: skyvern
   - tab: blog
+  - tab: community
   - tab: github
   - tab: cloud
   - tab: demo
+
+experimental: 
+  openapi-parser-v3: true

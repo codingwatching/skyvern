@@ -10,6 +10,7 @@ from anthropic import NOT_GIVEN
 from anthropic.types.beta.beta_message import BetaMessage as AnthropicMessage
 from jinja2 import Template
 from litellm.utils import CustomStreamWrapper, ModelResponse
+from pydantic import BaseModel
 
 from skyvern.config import settings
 from skyvern.exceptions import SkyvernContextWindowExceededError
@@ -31,6 +32,14 @@ from skyvern.forge.sdk.schemas.task_v2 import TaskV2, Thought
 from skyvern.utils.image_resizer import Resolution, get_resize_target_dimension, resize_screenshots
 
 LOG = structlog.get_logger()
+
+
+class LLMCallStats(BaseModel):
+    input_tokens: int | None = None
+    output_tokens: int | None = None
+    reasoning_tokens: int | None = None
+    cached_tokens: int | None = None
+    llm_cost: float | None = None
 
 
 class LLMAPIHandlerFactory:
@@ -73,6 +82,7 @@ class LLMAPIHandlerFactory:
             ai_suggestion: AISuggestion | None = None,
             screenshots: list[bytes] | None = None,
             parameters: dict[str, Any] | None = None,
+            llm_key_override: str | None = None,
         ) -> dict[str, Any]:
             """
             Custom LLM API handler that utilizes the LiteLLM router and fallbacks to OpenAI GPT-4 Vision.
@@ -258,15 +268,25 @@ class LLMAPIHandlerFactory:
             ai_suggestion: AISuggestion | None = None,
             screenshots: list[bytes] | None = None,
             parameters: dict[str, Any] | None = None,
+            llm_key_override: str | None = None,
         ) -> dict[str, Any]:
+            nonlocal llm_config
+            nonlocal llm_key
+
+            local_llm_config: LLMConfig | LLMRouterConfig = llm_config
+            if llm_key_override:
+                local_llm_config = LLMConfigRegistry.get_config(llm_key_override)
+
+            local_llm_key = llm_key_override or llm_key
+
             start_time = time.time()
             active_parameters = base_parameters or {}
             if parameters is None:
-                parameters = LLMAPIHandlerFactory.get_api_parameters(llm_config)
+                parameters = LLMAPIHandlerFactory.get_api_parameters(local_llm_config)
 
             active_parameters.update(parameters)
-            if llm_config.litellm_params:  # type: ignore
-                active_parameters.update(llm_config.litellm_params)  # type: ignore
+            if local_llm_config.litellm_params:  # type: ignore
+                active_parameters.update(local_llm_config.litellm_params)  # type: ignore
 
             context = skyvern_context.current()
             if context and len(context.hashed_href_map) > 0:
@@ -289,14 +309,16 @@ class LLMAPIHandlerFactory:
                 ai_suggestion=ai_suggestion,
             )
 
-            if not llm_config.supports_vision:
+            if not local_llm_config.supports_vision:
                 screenshots = None
 
-            messages = await llm_messages_builder(prompt, screenshots, llm_config.add_assistant_prefix)
+            model_name = local_llm_config.model_name
+
+            messages = await llm_messages_builder(prompt, screenshots, local_llm_config.add_assistant_prefix)
             await app.ARTIFACT_MANAGER.create_llm_artifact(
                 data=json.dumps(
                     {
-                        "model": llm_config.model_name,
+                        "model": model_name,
                         "messages": messages,
                         # we're not using active_parameters here because it may contain sensitive information
                         **parameters,
@@ -314,32 +336,32 @@ class LLMAPIHandlerFactory:
                 # TODO (kerem): add a retry mechanism to this call (acompletion_with_retries)
                 # TODO (kerem): use litellm fallbacks? https://litellm.vercel.app/docs/tutorials/fallbacks#how-does-completion_with_fallbacks-work
                 response = await litellm.acompletion(
-                    model=llm_config.model_name,
+                    model=model_name,
                     messages=messages,
                     timeout=settings.LLM_CONFIG_TIMEOUT,
                     **active_parameters,
                 )
             except litellm.exceptions.APIError as e:
-                raise LLMProviderErrorRetryableTask(llm_key) from e
+                raise LLMProviderErrorRetryableTask(local_llm_key) from e
             except litellm.exceptions.ContextWindowExceededError as e:
                 LOG.exception(
                     "Context window exceeded",
-                    llm_key=llm_key,
-                    model=llm_config.model_name,
+                    llm_key=local_llm_key,
+                    model=model_name,
                 )
                 raise SkyvernContextWindowExceededError() from e
             except CancelledError:
                 t_llm_cancelled = time.perf_counter()
                 LOG.error(
                     "LLM request got cancelled",
-                    llm_key=llm_key,
-                    model=llm_config.model_name,
+                    llm_key=local_llm_key,
+                    model=model_name,
                     duration=t_llm_cancelled - t_llm_request,
                 )
-                raise LLMProviderError(llm_key)
+                raise LLMProviderError(local_llm_key)
             except Exception as e:
-                LOG.exception("LLM request failed unexpectedly", llm_key=llm_key)
-                raise LLMProviderError(llm_key) from e
+                LOG.exception("LLM request failed unexpectedly", llm_key=local_llm_key)
+                raise LLMProviderError(local_llm_key) from e
 
             await app.ARTIFACT_MANAGER.create_llm_artifact(
                 data=response.model_dump_json(indent=2).encode("utf-8"),
@@ -387,7 +409,7 @@ class LLMAPIHandlerFactory:
                         cached_token_count=cached_tokens if cached_tokens > 0 else None,
                         thought_cost=llm_cost,
                     )
-            parsed_response = parse_api_response(response, llm_config.add_assistant_prefix)
+            parsed_response = parse_api_response(response, local_llm_config.add_assistant_prefix)
             await app.ARTIFACT_MANAGER.create_llm_artifact(
                 data=json.dumps(parsed_response, indent=2).encode("utf-8"),
                 artifact_type=ArtifactType.LLM_RESPONSE_PARSED,
@@ -414,9 +436,9 @@ class LLMAPIHandlerFactory:
             duration_seconds = time.time() - start_time
             LOG.info(
                 "LLM API handler duration metrics",
-                llm_key=llm_key,
+                llm_key=local_llm_key,
                 prompt_name=prompt_name,
-                model=llm_config.model_name,
+                model=local_llm_config.model_name,
                 duration_seconds=duration_seconds,
                 step_id=step.step_id if step else None,
                 thought_id=thought.observer_thought_id if thought else None,
@@ -624,41 +646,27 @@ class LLMCaller:
         )
 
         if step or thought:
-            try:
-                llm_cost = litellm.completion_cost(completion_response=response)
-            except Exception as e:
-                LOG.debug("Failed to calculate LLM cost", error=str(e), exc_info=True)
-                llm_cost = 0
-            prompt_tokens = response.get("usage", {}).get("prompt_tokens", 0)
-            completion_tokens = response.get("usage", {}).get("completion_tokens", 0)
-            reasoning_tokens = 0
-            completion_token_detail = response.get("usage", {}).get("completion_tokens_details")
-            if completion_token_detail:
-                reasoning_tokens = completion_token_detail.reasoning_tokens or 0
-            cached_tokens = 0
-            cached_token_detail = response.get("usage", {}).get("prompt_tokens_details")
-            if cached_token_detail:
-                cached_tokens = cached_token_detail.cached_tokens or 0
+            call_stats = await self.get_call_stats(response)
             if step:
                 await app.DATABASE.update_step(
                     task_id=step.task_id,
                     step_id=step.step_id,
                     organization_id=step.organization_id,
-                    incremental_cost=llm_cost,
-                    incremental_input_tokens=prompt_tokens if prompt_tokens > 0 else None,
-                    incremental_output_tokens=completion_tokens if completion_tokens > 0 else None,
-                    incremental_reasoning_tokens=reasoning_tokens if reasoning_tokens > 0 else None,
-                    incremental_cached_tokens=cached_tokens if cached_tokens > 0 else None,
+                    incremental_cost=call_stats.llm_cost,
+                    incremental_input_tokens=call_stats.input_tokens,
+                    incremental_output_tokens=call_stats.output_tokens,
+                    incremental_reasoning_tokens=call_stats.reasoning_tokens,
+                    incremental_cached_tokens=call_stats.cached_tokens,
                 )
             if thought:
                 await app.DATABASE.update_thought(
                     thought_id=thought.observer_thought_id,
                     organization_id=thought.organization_id,
-                    input_token_count=prompt_tokens if prompt_tokens > 0 else None,
-                    output_token_count=completion_tokens if completion_tokens > 0 else None,
-                    reasoning_token_count=reasoning_tokens if reasoning_tokens > 0 else None,
-                    cached_token_count=cached_tokens if cached_tokens > 0 else None,
-                    thought_cost=llm_cost,
+                    input_token_count=call_stats.input_tokens,
+                    output_token_count=call_stats.output_tokens,
+                    reasoning_token_count=call_stats.reasoning_tokens,
+                    cached_token_count=call_stats.cached_tokens,
+                    thought_cost=call_stats.llm_cost,
                 )
         # Track LLM API handler duration
         duration_seconds = time.perf_counter() - start_time
@@ -756,6 +764,46 @@ class LLMCaller:
             timeout=timeout,
         )
         return response
+
+    async def get_call_stats(self, response: ModelResponse | CustomStreamWrapper | AnthropicMessage) -> LLMCallStats:
+        empty_call_stats = LLMCallStats()
+        if isinstance(response, AnthropicMessage):
+            usage = response.usage
+            input_token_cost = (3.0 / 1000000) * usage.input_tokens
+            output_token_cost = (15.0 / 1000000) * usage.output_tokens
+            cached_token_cost = (0.3 / 1000000) * usage.cache_read_input_tokens
+            llm_cost = input_token_cost + output_token_cost + cached_token_cost
+            return LLMCallStats(
+                llm_cost=llm_cost,
+                input_tokens=usage.input_tokens,
+                output_tokens=usage.output_tokens,
+                cached_tokens=usage.cache_read_input_tokens,
+                reasoning_tokens=0,
+            )
+        elif isinstance(response, (ModelResponse, CustomStreamWrapper)):
+            try:
+                llm_cost = litellm.completion_cost(completion_response=response)
+            except Exception as e:
+                LOG.debug("Failed to calculate LLM cost", error=str(e), exc_info=True)
+                llm_cost = 0
+            input_tokens = response.get("usage", {}).get("prompt_tokens", 0)
+            output_tokens = response.get("usage", {}).get("completion_tokens", 0)
+            reasoning_tokens = 0
+            completion_token_detail = response.get("usage", {}).get("completion_tokens_details")
+            if completion_token_detail:
+                reasoning_tokens = completion_token_detail.reasoning_tokens or 0
+            cached_tokens = 0
+            cached_token_detail = response.get("usage", {}).get("prompt_tokens_details")
+            if cached_token_detail:
+                cached_tokens = cached_token_detail.cached_tokens or 0
+            return LLMCallStats(
+                llm_cost=llm_cost,
+                input_tokens=input_tokens,
+                output_tokens=output_tokens,
+                cached_tokens=cached_tokens,
+                reasoning_tokens=reasoning_tokens,
+            )
+        return empty_call_stats
 
 
 class LLMCallerManager:

@@ -1,5 +1,6 @@
 import type { Node } from "@xyflow/react";
 import { NodeBaseData } from "../types";
+import { RunEngine } from "@/api/types";
 
 export type NavigationNodeData = NodeBaseData & {
   url: string;
@@ -7,6 +8,7 @@ export type NavigationNodeData = NodeBaseData & {
   errorCodeMapping: string;
   completeCriterion: string;
   terminateCriterion: string;
+  engine: RunEngine | null;
   maxRetries: number | null;
   maxStepsOverride: number | null;
   allowDownloads: boolean;
@@ -15,6 +17,7 @@ export type NavigationNodeData = NodeBaseData & {
   totpVerificationUrl: string | null;
   totpIdentifier: string | null;
   cacheActions: boolean;
+  includeActionHistoryInVerification: boolean;
 };
 
 export type NavigationNode = Node<NavigationNodeData, "navigation">;
@@ -26,6 +29,8 @@ export const navigationNodeDefaultData: NavigationNodeData = {
   completeCriterion: "",
   terminateCriterion: "",
   errorCodeMapping: "null",
+  model: { model: "" },
+  engine: RunEngine.SkyvernV1,
   maxRetries: null,
   maxStepsOverride: null,
   allowDownloads: false,
@@ -36,6 +41,7 @@ export const navigationNodeDefaultData: NavigationNodeData = {
   totpIdentifier: null,
   continueOnFailure: false,
   cacheActions: false,
+  includeActionHistoryInVerification: false,
 } as const;
 
 export function isNavigationNode(node: Node): node is NavigationNode {

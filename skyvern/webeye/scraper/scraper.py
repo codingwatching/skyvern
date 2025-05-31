@@ -545,7 +545,8 @@ async def scrape_web_unsafe(
     try:
         skyvern_frame = await SkyvernFrame.create_instance(frame=page)
         html = await skyvern_frame.get_content()
-        window_dimension = Resolution(width=page.viewport_size["width"], height=page.viewport_size["height"])
+        if page.viewport_size:
+            window_dimension = Resolution(width=page.viewport_size["width"], height=page.viewport_size["height"])
     except Exception:
         LOG.error(
             "Failed out to get HTML content",
@@ -724,7 +725,7 @@ class IncrementalScrapePage:
         return self.element_tree_trimmed
 
     async def start_listen_dom_increment(self, element: ElementHandle | None = None) -> None:
-        js_script = "(element) => startGlobalIncrementalObserver(element)"
+        js_script = "async (element) => await startGlobalIncrementalObserver(element)"
         await SkyvernFrame.evaluate(frame=self.skyvern_frame.get_frame(), expression=js_script, arg=element)
 
     async def stop_listen_dom_increment(self) -> None:
@@ -738,6 +739,11 @@ class IncrementalScrapePage:
         )
 
     async def get_incremental_elements_num(self) -> int:
+        # check if the DOM has navigated away or refreshed
+        js_script = "() => window.globalOneTimeIncrementElements === undefined"
+        if await SkyvernFrame.evaluate(frame=self.skyvern_frame.get_frame(), expression=js_script):
+            return 0
+
         js_script = "() => window.globalOneTimeIncrementElements.length"
         return await SkyvernFrame.evaluate(frame=self.skyvern_frame.get_frame(), expression=js_script)
 

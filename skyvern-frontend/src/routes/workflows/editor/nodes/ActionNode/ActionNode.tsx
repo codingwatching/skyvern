@@ -34,6 +34,8 @@ import { AppNode } from "..";
 import { getAvailableOutputParameterKeys } from "../../workflowEditorUtils";
 import { ParametersMultiSelect } from "../TaskNode/ParametersMultiSelect";
 import { useIsFirstBlockInWorkflow } from "../../hooks/useIsFirstNodeInWorkflow";
+import { RunEngineSelector } from "@/components/EngineSelector";
+import { ModelSelector } from "@/components/ModelSelector";
 
 const urlTooltip =
   "The URL Skyvern is navigating to. Leave this field blank to pick up from where the last block left off.";
@@ -58,7 +60,9 @@ function ActionNode({ id, data }: NodeProps<ActionNode>) {
     cacheActions: data.cacheActions,
     downloadSuffix: data.downloadSuffix,
     totpVerificationUrl: data.totpVerificationUrl,
+    model: data.model,
     totpIdentifier: data.totpIdentifier,
+    engine: data.engine,
   });
   const deleteNodeCallback = useDeleteNodeCallback();
 
@@ -173,12 +177,33 @@ function ActionNode({ id, data }: NodeProps<ActionNode>) {
             <AccordionContent className="pl-6 pr-1 pt-1">
               <div className="space-y-4">
                 <div className="space-y-2">
+                  <ModelSelector
+                    className="nopan w-52 text-xs"
+                    value={inputs.model}
+                    onChange={(value) => {
+                      handleChange("model", value);
+                    }}
+                  />
                   <ParametersMultiSelect
                     availableOutputParameters={outputParameterKeys}
                     parameters={data.parameterKeys}
                     onParametersChange={(parameterKeys) => {
                       updateNodeData(id, { parameterKeys });
                     }}
+                  />
+                </div>
+                <div className="flex items-center justify-between">
+                  <div className="flex gap-2">
+                    <Label className="text-xs font-normal text-slate-300">
+                      Engine
+                    </Label>
+                  </div>
+                  <RunEngineSelector
+                    value={inputs.engine}
+                    onChange={(value) => {
+                      handleChange("engine", value);
+                    }}
+                    className="nopan w-52 text-xs"
                   />
                 </div>
                 <div className="space-y-2">

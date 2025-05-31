@@ -117,6 +117,7 @@ class BlockYAML(BaseModel, abc.ABC):
     block_type: BlockType
     label: str
     continue_on_failure: bool = False
+    model: dict[str, Any] | None = None
 
 
 class TaskBlockYAML(BlockYAML):
@@ -128,6 +129,7 @@ class TaskBlockYAML(BlockYAML):
 
     url: str | None = None
     title: str = ""
+    engine: RunEngine = RunEngine.skyvern_v1
     navigation_goal: str | None = None
     data_extraction_goal: str | None = None
     data_schema: dict[str, Any] | list | None = None
@@ -143,6 +145,7 @@ class TaskBlockYAML(BlockYAML):
     complete_criterion: str | None = None
     terminate_criterion: str | None = None
     complete_verification: bool = True
+    include_action_history_in_verification: bool = False
 
 
 class ForLoopBlockYAML(BlockYAML):
@@ -258,6 +261,7 @@ class ActionBlockYAML(BlockYAML):
 
     url: str | None = None
     title: str = ""
+    engine: RunEngine = RunEngine.skyvern_v1
     navigation_goal: str | None = None
     error_code_mapping: dict[str, str] | None = None
     max_retries: int = 0
@@ -288,6 +292,7 @@ class NavigationBlockYAML(BlockYAML):
     complete_criterion: str | None = None
     terminate_criterion: str | None = None
     complete_verification: bool = True
+    include_action_history_in_verification: bool = False
 
 
 class ExtractionBlockYAML(BlockYAML):
@@ -296,6 +301,7 @@ class ExtractionBlockYAML(BlockYAML):
     data_extraction_goal: str
     url: str | None = None
     title: str = ""
+    engine: RunEngine = RunEngine.skyvern_v1
     data_schema: dict[str, Any] | list | None = None
     max_retries: int = 0
     max_steps_per_run: int | None = None
@@ -308,6 +314,7 @@ class LoginBlockYAML(BlockYAML):
 
     url: str | None = None
     title: str = ""
+    engine: RunEngine = RunEngine.skyvern_v1
     navigation_goal: str | None = None
     error_code_mapping: dict[str, str] | None = None
     max_retries: int = 0
@@ -332,6 +339,7 @@ class FileDownloadBlockYAML(BlockYAML):
     navigation_goal: str
     url: str | None = None
     title: str = ""
+    engine: RunEngine = RunEngine.skyvern_v1
     error_code_mapping: dict[str, str] | None = None
     max_retries: int = 0
     max_steps_per_run: int | None = None
@@ -406,6 +414,7 @@ class WorkflowCreateYAMLRequest(BaseModel):
     totp_verification_url: str | None = None
     totp_identifier: str | None = None
     persist_browser_session: bool = False
+    model: dict[str, Any] | None = None
     workflow_definition: WorkflowDefinitionYAML
     is_saved_task: bool = False
     status: WorkflowStatus = WorkflowStatus.published

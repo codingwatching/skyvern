@@ -5,6 +5,7 @@ import copy
 import typing
 from enum import StrEnum
 from random import uniform
+from urllib.parse import urlparse
 
 import structlog
 from playwright.async_api import ElementHandle, Frame, FrameLocator, Locator, Page, TimeoutError
@@ -93,6 +94,7 @@ class SkyvernElement:
     When you try to interact with these elements by python, you are supposed to use this class as an interface.
     """
 
+    # TODO: support to create SkyvernElement from incremental page by xpath
     @classmethod
     async def create_from_incremental(cls, incre_page: IncrementalScrapePage, element_id: str) -> SkyvernElement:
         element_dict = incre_page.id_to_element_dict.get(element_id)
@@ -135,6 +137,13 @@ class SkyvernElement:
 
     def __repr__(self) -> str:
         return f"SkyvernElement({str(self.__static_element)})"
+
+    async def _trim_target_attr(self) -> None:
+        if "target" not in self.get_attributes():
+            return
+        LOG.debug("Removing target attribute from the element", element=self.get_id())
+        skyvern_frame = await SkyvernFrame.create_instance(self.get_frame())
+        await skyvern_frame.remove_target_attr(await self.get_element_handler())
 
     def build_HTML(self, need_trim_element: bool = True, need_skyvern_attrs: bool = True) -> str:
         element_dict = self.get_element_dict()
@@ -297,6 +306,15 @@ class SkyvernElement:
         skyvern_frame = await SkyvernFrame.create_instance(self.get_frame())
         return await skyvern_frame.is_sibling(await self.get_element_handler(), target)
 
+    async def has_hidden_attr(self) -> bool:
+        hidden: str | None = await self.get_attr("hidden", mode="dynamic")
+        aria_hidden: str | None = await self.get_attr("aria-hidden", mode="dynamic")
+        if hidden is not None and hidden.lower() != "false":
+            return True
+        if aria_hidden is not None and aria_hidden.lower() != "false":
+            return True
+        return False
+
     def get_element_dict(self) -> dict:
         return self.__static_element
 
@@ -339,6 +357,27 @@ class SkyvernElement:
         handler = await self.locator.element_handle(timeout=timeout)
         assert handler is not None
         return handler
+
+    async def should_use_navigation_instead_click(self, page: Page) -> str | None:
+        if await self.get_attr("target", mode="static") != "_blank":
+            return None
+
+        href: str | None = await self.get_attr("href", mode="static")
+        if not href:
+            return None
+
+        href_url = urlparse(href)
+        if href_url.scheme.lower() not in ["http", "https"]:
+            return None
+
+        if not href_url.netloc:
+            return None
+
+        cur_url = urlparse(page.url)
+        if href_url.netloc.lower() == cur_url.netloc.lower():
+            return None
+
+        return href
 
     async def find_blocking_element(
         self, dom: DomUtil, incremental_page: IncrementalScrapePage | None = None
@@ -729,6 +768,45 @@ class SkyvernElement:
 
         return True
 
+    async def navigate_to_a_href(self, page: Page) -> str | None:
+        if self.get_tag_name() != InteractiveElement.A:
+            await self._trim_target_attr()
+            return None
+
+        href = await self.should_use_navigation_instead_click(page)
+        if not href:
+            await self._trim_target_attr()
+            return None
+
+        LOG.info(
+            "Trying to navigate to the <a> href link instead of clicking",
+            href=href,
+            current_url=page.url,
+        )
+        try:
+            await page.goto(href, timeout=settings.BROWSER_LOADING_TIMEOUT_MS)
+            return href
+        except Exception as e:
+            # some cases use this method to download a file. but it will be redirected away soon
+            # and agent will run into ABORTED error.
+            if "net::ERR_ABORTED" in str(e):
+                return href
+
+            LOG.warning("Failed to navigate to the <a> href link", exc_info=True, href=href, current_url=page.url)
+            raise
+
+    async def refresh_select_options(self) -> tuple[list, str] | None:
+        if self.get_tag_name() != InteractiveElement.SELECT:
+            return None
+
+        frame = await SkyvernFrame.create_instance(self.get_frame())
+        options, selected_value = await frame.get_select_options(await self.get_element_handler())
+        self.__static_element["options"] = options
+        if "attributes" in self.__static_element:
+            self.__static_element["attributes"]["selected"] = selected_value
+            self._attributes = self.__static_element["attributes"]
+        return options, selected_value
+
 
 class DomUtil:
     """
@@ -764,8 +842,20 @@ class DomUtil:
 
         num_elements = await locator.count()
         if num_elements < 1:
-            LOG.warning("No elements found with css. Validation failed.", css=css, element_id=element_id)
-            raise MissingElement(selector=css, element_id=element_id)
+            xpath: str | None = element.get("xpath")
+            if not xpath:
+                LOG.warning("No elements found with css. Validation failed.", css=css, element_id=element_id)
+                raise MissingElement(selector=css, element_id=element_id)
+            else:
+                # WARNING: current xpath is based on the tag name.
+                # It can only represent the element possition in the DOM tree with tag name, it's not 100% reliable.
+                # As long as the current possition has the same element with the tag name, the locator can be found.
+                # (maybe) we should validate the element hash to make sure the element is the same?
+                LOG.warning("Fallback to locator element by xpath.", xpath=xpath, element_id=element_id)
+                locator = frame_content.locator(f"xpath={xpath}")
+                num_elements = await locator.count()
+                if num_elements < 1:
+                    raise MissingElement(selector=xpath, element_id=element_id)
 
         elif num_elements > 1:
             LOG.warning(
