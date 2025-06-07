@@ -208,6 +208,8 @@ class Settings(BaseSettings):
 
     # VERTEX_AI
     VERTEX_CREDENTIALS: str | None = None
+    VERTEX_PROJECT_ID: str | None = None
+    VERTEX_LOCATION: str | None = None
 
     # NOVITA AI
     ENABLE_NOVITA: bool = False
@@ -257,9 +259,54 @@ class Settings(BaseSettings):
 
     TASK_BLOCKED_SITE_FALLBACK_URL: str = "https://www.google.com"
 
+    SKYVERN_APP_URL: str = "http://localhost:8080"
     # SkyvernClient Settings
     SKYVERN_BASE_URL: str = "https://api.skyvern.com"
     SKYVERN_API_KEY: str = "PLACEHOLDER"
+
+    def get_model_name_to_llm_key(self) -> dict[str, dict[str, str]]:
+        """
+        Keys are model names available to blocks in the frontend. These map to key names
+        in LLMConfigRegistry._configs.
+        """
+
+        if self.is_cloud_environment():
+            return {
+                "gemini-2.5-pro-preview-05-06": {"llm_key": "VERTEX_GEMINI_2.5_PRO_PREVIEW", "label": "Gemini 2.5 Pro"},
+                "gemini-2.5-flash-preview-05-20": {
+                    "llm_key": "VERTEX_GEMINI_2.5_FLASH_PREVIEW_05_20",
+                    "label": "Gemini 2.5 Flash",
+                },
+                "azure/gpt-4.1": {"llm_key": "AZURE_OPENAI_GPT4_1", "label": "GPT 4.1"},
+                "azure/o4-mini": {"llm_key": "AZURE_OPENAI_O4_MINI", "label": "GPT O4 Mini"},
+                "us.anthropic.claude-opus-4-20250514-v1:0": {
+                    "llm_key": "BEDROCK_ANTHROPIC_CLAUDE4_OPUS_INFERENCE_PROFILE",
+                    "label": "Anthropic Claude 4 Opus",
+                },
+                "us.anthropic.claude-sonnet-4-20250514-v1:0": {
+                    "llm_key": "BEDROCK_ANTHROPIC_CLAUDE4_SONNET_INFERENCE_PROFILE",
+                    "label": "Anthropic Claude 4 Sonnet",
+                },
+            }
+        else:
+            # TODO: apparently the list for OSS is to be much larger
+            return {
+                "gemini-2.5-pro-preview-05-06": {"llm_key": "VERTEX_GEMINI_2.5_PRO_PREVIEW", "label": "Gemini 2.5 Pro"},
+                "gemini-2.5-flash-preview-05-20": {
+                    "llm_key": "VERTEX_GEMINI_2.5_FLASH_PREVIEW_05_20",
+                    "label": "Gemini 2.5 Flash",
+                },
+                "azure/gpt-4.1": {"llm_key": "AZURE_OPENAI_GPT4_1", "label": "GPT 4.1"},
+                "azure/o4-mini": {"llm_key": "AZURE_OPENAI_O4_MINI", "label": "GPT O4 Mini"},
+                "us.anthropic.claude-opus-4-20250514-v1:0": {
+                    "llm_key": "BEDROCK_ANTHROPIC_CLAUDE4_OPUS_INFERENCE_PROFILE",
+                    "label": "Anthropic Claude 4 Opus",
+                },
+                "us.anthropic.claude-sonnet-4-20250514-v1:0": {
+                    "llm_key": "BEDROCK_ANTHROPIC_CLAUDE4_SONNET_INFERENCE_PROFILE",
+                    "label": "Anthropic Claude 4 Sonnet",
+                },
+            }
 
     def is_cloud_environment(self) -> bool:
         """

@@ -36,6 +36,8 @@ import { ParametersMultiSelect } from "./ParametersMultiSelect";
 import type { TaskNode } from "./types";
 import { WorkflowDataSchemaInputGroup } from "@/components/DataSchemaInputGroup/WorkflowDataSchemaInputGroup";
 import { useIsFirstBlockInWorkflow } from "../../hooks/useIsFirstNodeInWorkflow";
+import { RunEngineSelector } from "@/components/EngineSelector";
+import { ModelSelector } from "@/components/ModelSelector";
 
 function TaskNode({ id, data }: NodeProps<TaskNode>) {
   const { updateNodeData } = useReactFlow();
@@ -66,6 +68,9 @@ function TaskNode({ id, data }: NodeProps<TaskNode>) {
     errorCodeMapping: data.errorCodeMapping,
     totpVerificationUrl: data.totpVerificationUrl,
     totpIdentifier: data.totpIdentifier,
+    includeActionHistoryInVerification: data.includeActionHistoryInVerification,
+    engine: data.engine,
+    model: data.model,
   });
 
   function handleChange(key: string, value: unknown) {
@@ -228,6 +233,27 @@ function TaskNode({ id, data }: NodeProps<TaskNode>) {
                   />
                 </div>
                 <Separator />
+                <ModelSelector
+                  className="nopan w-52 text-xs"
+                  value={inputs.model}
+                  onChange={(value) => {
+                    handleChange("model", value);
+                  }}
+                />
+                <div className="flex items-center justify-between">
+                  <div className="flex gap-2">
+                    <Label className="text-xs font-normal text-slate-300">
+                      Engine
+                    </Label>
+                  </div>
+                  <RunEngineSelector
+                    value={inputs.engine}
+                    onChange={(value) => {
+                      handleChange("engine", value);
+                    }}
+                    className="nopan w-52 text-xs"
+                  />
+                </div>
                 <div className="flex items-center justify-between">
                   <div className="flex gap-2">
                     <Label className="text-xs font-normal text-slate-300">
@@ -290,6 +316,31 @@ function TaskNode({ id, data }: NodeProps<TaskNode>) {
                   )}
                 </div>
                 <Separator />
+                <div className="flex items-center justify-between">
+                  <div className="flex gap-2">
+                    <Label className="text-xs font-normal text-slate-300">
+                      Include Action History
+                    </Label>
+                    <HelpTooltip
+                      content={
+                        helpTooltips["task"][
+                          "includeActionHistoryInVerification"
+                        ]
+                      }
+                    />
+                  </div>
+                  <div className="w-52">
+                    <Switch
+                      checked={inputs.includeActionHistoryInVerification}
+                      onCheckedChange={(checked) => {
+                        handleChange(
+                          "includeActionHistoryInVerification",
+                          checked,
+                        );
+                      }}
+                    />
+                  </div>
+                </div>
                 <div className="flex items-center justify-between">
                   <div className="flex gap-2">
                     <Label className="text-xs font-normal text-slate-300">

@@ -1,6 +1,5 @@
 <!-- START doctoc generated TOC please keep comment here to allow auto update -->
 <!-- DON'T EDIT THIS SECTION, INSTEAD RE-RUN doctoc TO UPDATE -->
-**Table of Contents**  *generated with [DocToc](https://github.com/thlorenz/doctoc)*
 
 - [Skyvern LlamaIndex](#skyvern-llamaindex)
   - [Installation](#installation)
@@ -32,7 +31,7 @@ pip install skyvern-llamaindex
 ### Run a task(sync) locally in your local environment
 > sync task won't return until the task is finished.
 
-:warning: :warning: if you want to run this code block, you need to run `skyvern init --openai-api-key <your_openai_api_key>` command in your terminal to set up skyvern first.
+:warning: :warning: if you want to run this code block, you need to run `skyvern init` command in your terminal to set up skyvern first.
 
 
 ```python
@@ -61,7 +60,7 @@ print(response)
 
 :warning: :warning: if you want to run the task in the background, you need to keep the agent running until the task is finished, otherwise the task will be killed when the agent finished the chat.
 
-:warning: :warning: if you want to run this code block, you need to run `skyvern init --openai-api-key <your_openai_api_key>` command in your terminal to set up skyvern first.
+:warning: :warning: if you want to run this code block, you need to run `skyvern init` command in your terminal to set up skyvern first.
 
 ```python
 import asyncio
@@ -99,7 +98,7 @@ print(response)
 
 ### Get a task locally in your local environment
 
-:warning: :warning: if you want to run this code block, you need to run `skyvern init --openai-api-key <your_openai_api_key>` command in your terminal to set up skyvern first.
+:warning: :warning: if you want to run this code block, you need to run `skyvern init` command in your terminal to set up skyvern first.
 
 ```python
 from dotenv import load_dotenv
@@ -215,7 +214,7 @@ To provide some examples of how to integrate Skyvern with other llama-index tool
 ### Dispatch a task(async) locally in your local environment and wait until the task is finished
 > dispatch task will return immediately and the task will be running in the background. You can use `get_task` tool to poll the task information until the task is finished.
 
-:warning: :warning: if you want to run this code block, you need to run `skyvern init --openai-api-key <your_openai_api_key>` command in your terminal to set up skyvern first.
+:warning: :warning: if you want to run this code block, you need to run `skyvern init` command in your terminal to set up skyvern first.
 
 ```python
 import asyncio

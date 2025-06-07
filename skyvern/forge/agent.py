@@ -72,6 +72,7 @@ from skyvern.forge.sdk.workflow.context_manager import WorkflowRunContext
 from skyvern.forge.sdk.workflow.models.block import ActionBlock, BaseTaskBlock, ValidationBlock
 from skyvern.forge.sdk.workflow.models.workflow import Workflow, WorkflowRun, WorkflowRunStatus
 from skyvern.schemas.runs import CUA_ENGINES, CUA_RUN_TYPES, RunEngine
+from skyvern.services import run_service
 from skyvern.utils.image_resizer import Resolution
 from skyvern.utils.prompt_engine import load_prompt_with_elements
 from skyvern.webeye.actions.actions import (
@@ -109,9 +110,9 @@ class ForgeAgent:
     def __init__(self) -> None:
         if settings.ADDITIONAL_MODULES:
             for module in settings.ADDITIONAL_MODULES:
-                LOG.info("Loading additional module", module=module)
+                LOG.debug("Loading additional module", module=module)
                 __import__(module)
-            LOG.info(
+            LOG.debug(
                 "Additional modules loaded",
                 modules=settings.ADDITIONAL_MODULES,
             )
@@ -172,6 +173,8 @@ class ForgeAgent:
             retry=task_retry,
             max_steps_per_run=task_block.max_steps_per_run,
             error_code_mapping=task_block.error_code_mapping,
+            include_action_history_in_verification=task_block.include_action_history_in_verification,
+            model=task_block.model,
         )
         LOG.info(
             "Created a new task for workflow run",
@@ -207,7 +210,7 @@ class ForgeAgent:
         )
         return task, step
 
-    async def create_task(self, task_request: TaskRequest, organization_id: str | None = None) -> Task:
+    async def create_task(self, task_request: TaskRequest, organization_id: str) -> Task:
         webhook_callback_url = str(task_request.webhook_callback_url) if task_request.webhook_callback_url else None
         totp_verification_url = str(task_request.totp_verification_url) if task_request.totp_verification_url else None
         task = await app.DATABASE.create_task(
@@ -226,6 +229,8 @@ class ForgeAgent:
             extracted_information_schema=task_request.extracted_information_schema,
             error_code_mapping=task_request.error_code_mapping,
             application=task_request.application,
+            include_action_history_in_verification=task_request.include_action_history_in_verification,
+            model=task_request.model,
         )
         LOG.info(
             "Created new task",
@@ -378,13 +383,21 @@ class ForgeAgent:
             if page := await browser_state.get_working_page():
                 await self.register_async_operations(organization, task, page)
 
-            llm_caller = LLMCallerManager.get_llm_caller(task.task_id)
             if engine == RunEngine.anthropic_cua and not llm_caller:
-                # llm_caller = LLMCaller(llm_key="BEDROCK_ANTHROPIC_CLAUDE3.5_SONNET_INFERENCE_PROFILE")
+                # see if the llm_caller is already set in memory
                 llm_caller = LLMCallerManager.get_llm_caller(task.task_id)
                 if not llm_caller:
-                    llm_caller = LLMCaller(llm_key=settings.ANTHROPIC_CUA_LLM_KEY, screenshot_scaling_enabled=True)
-                    LLMCallerManager.set_llm_caller(task.task_id, llm_caller)
+                    # if not, create a new llm_caller
+                    llm_key = task.llm_key
+                    llm_caller = LLMCaller(
+                        llm_key=llm_key or settings.ANTHROPIC_CUA_LLM_KEY, screenshot_scaling_enabled=True
+                    )
+
+            # TODO: remove the code after migrating everything to llm callers
+            # currently, only anthropic cua tasks use llm_caller
+            if engine == RunEngine.anthropic_cua and llm_caller:
+                LLMCallerManager.set_llm_caller(task.task_id, llm_caller)
+
             step, detailed_output = await self.agent_step(
                 task,
                 step,
@@ -854,11 +867,13 @@ class ForgeAgent:
                 else:
                     if engine in CUA_ENGINES:
                         self.async_operation_pool.run_operation(task.task_id, AgentPhase.llm)
+
                     json_response = await app.LLM_API_HANDLER(
                         prompt=extract_action_prompt,
                         prompt_name="extract-actions",
                         step=step,
                         screenshots=scraped_page.screenshots,
+                        llm_key_override=task.llm_key,
                     )
                     try:
                         json_response = await self.handle_potential_verification_code(
@@ -1033,6 +1048,7 @@ class ForgeAgent:
                 for result in results:
                     result.step_retry_number = step.retry_index
                     result.step_order = step.order
+                step.output = detailed_agent_step_output.to_agent_step_output()
                 action_results.extend(results)
                 # Check the last result for this action. If that succeeded, assume the entire action is successful
                 if results and results[-1].success:
@@ -1430,6 +1446,7 @@ class ForgeAgent:
         if not llm_caller.message_history:
             llm_response = await llm_caller.call(
                 prompt=task.navigation_goal,
+                step=step,
                 screenshots=scraped_page.screenshots,
                 use_message_history=True,
                 tools=tools,
@@ -1440,6 +1457,7 @@ class ForgeAgent:
             )
         else:
             llm_response = await llm_caller.call(
+                step=step,
                 screenshots=scraped_page.screenshots,
                 use_message_history=True,
                 tools=tools,
@@ -1460,8 +1478,9 @@ class ForgeAgent:
         )
         return actions
 
-    @staticmethod
-    async def complete_verify(page: Page, scraped_page: ScrapedPage, task: Task, step: Step) -> CompleteVerifyResult:
+    async def complete_verify(
+        self, page: Page, scraped_page: ScrapedPage, task: Task, step: Step
+    ) -> CompleteVerifyResult:
         LOG.info(
             "Checking if user goal is achieved after re-scraping the page",
             task_id=task.task_id,
@@ -1470,10 +1489,16 @@ class ForgeAgent:
         )
         run_obj = await app.DATABASE.get_run(run_id=task.task_id, organization_id=task.organization_id)
         scroll = True
+        llm_key_override = task.llm_key
         if run_obj and run_obj.task_run_type in CUA_RUN_TYPES:
             scroll = False
+            llm_key_override = None
 
         scraped_page_refreshed = await scraped_page.refresh(draw_boxes=False, scroll=scroll)
+
+        actions_and_results_str = ""
+        if task.include_action_history_in_verification:
+            actions_and_results_str = await self._get_action_results(task, current_step=step)
 
         verification_prompt = load_prompt_with_elements(
             scraped_page=scraped_page_refreshed,
@@ -1482,24 +1507,26 @@ class ForgeAgent:
             navigation_goal=task.navigation_goal,
             navigation_payload=task.navigation_payload,
             complete_criterion=task.complete_criterion,
+            action_history=actions_and_results_str,
             local_datetime=datetime.now(skyvern_context.ensure_context().tz_info).isoformat(),
         )
 
         # this prompt is critical to our agent so let's use the primary LLM API handler
+
         verification_result = await app.LLM_API_HANDLER(
             prompt=verification_prompt,
             step=step,
             screenshots=scraped_page_refreshed.screenshots,
             prompt_name="check-user-goal",
+            llm_key_override=llm_key_override,
         )
         return CompleteVerifyResult.model_validate(verification_result)
 
-    @staticmethod
     async def check_user_goal_complete(
-        page: Page, scraped_page: ScrapedPage, task: Task, step: Step
+        self, page: Page, scraped_page: ScrapedPage, task: Task, step: Step
     ) -> CompleteAction | None:
         try:
-            verification_result = await app.agent.complete_verify(
+            verification_result = await self.complete_verify(
                 page=page,
                 scraped_page=scraped_page,
                 task=task,
@@ -1876,11 +1903,20 @@ class ForgeAgent:
                 current_context.totp_codes.pop(task.task_id)
         return final_navigation_payload
 
-    async def _get_action_results(self, task: Task) -> str:
+    async def _get_action_results(self, task: Task, current_step: Step | None = None) -> str:
+        """
+        Get the action results from the last app.SETTINGS.PROMPT_ACTION_HISTORY_WINDOW steps.
+        If current_step is provided, the current executing step will be included in the action history.
+        Default is excluding the current executing step from the action history.
+        """
+
         # Get action results from the last app.SETTINGS.PROMPT_ACTION_HISTORY_WINDOW steps
         steps = await app.DATABASE.get_task_steps(task_id=task.task_id, organization_id=task.organization_id)
         # the last step is always the newly created one and it should be excluded from the history window
         window_steps = steps[-1 - settings.PROMPT_ACTION_HISTORY_WINDOW : -1]
+        if current_step:
+            window_steps.append(current_step)
+
         actions_and_results: list[tuple[Action, list[ActionResult]]] = []
         for window_step in window_steps:
             if window_step.output and window_step.output.actions_and_results:
@@ -1938,10 +1974,11 @@ class ForgeAgent:
                         )
                         return action_result.data
 
-        LOG.warning(
-            "Failed to find extracted information for task",
-            task_id=task.task_id,
-        )
+        if task.data_extraction_goal:
+            LOG.warning(
+                "Failed to find extracted information for task",
+                task_id=task.task_id,
+            )
         return None
 
     async def get_failure_reason_for_task(self, task: Task) -> str | None:
@@ -2089,23 +2126,36 @@ class ForgeAgent:
             return
 
         task_response = await self.build_task_response(task=task, last_step=last_step)
-
-        # send task_response to the webhook callback url
-        payload = task_response.model_dump_json(exclude={"request"})
-        headers = generate_skyvern_webhook_headers(payload=payload, api_key=api_key)
-        LOG.info(
-            "Sending task response to webhook callback url",
-            task_id=task.task_id,
-            webhook_callback_url=task.webhook_callback_url,
-            payload=payload,
-            headers=headers,
-        )
+        # try to build the new TaskRunResponse for backward compatibility
+        task_run_response_json: str | None = None
         try:
+            run_response = await run_service.get_run_response(
+                run_id=task.task_id,
+                organization_id=task.organization_id,
+            )
+            if run_response is not None:
+                task_run_response_json = run_response.model_dump_json(exclude={"run_request"})
+
+            # send task_response to the webhook callback url
+            payload_json = task_response.model_dump_json(exclude={"request"})
+            payload_dict = json.loads(payload_json)
+            if task_run_response_json:
+                payload_dict.update(json.loads(task_run_response_json))
+            payload = json.dumps(payload_dict, separators=(",", ":"), ensure_ascii=False)
+            headers = generate_skyvern_webhook_headers(payload=payload, api_key=api_key)
+            LOG.info(
+                "Sending task response to webhook callback url",
+                task_id=task.task_id,
+                webhook_callback_url=task.webhook_callback_url,
+                payload=payload,
+                headers=headers,
+            )
+
             async with httpx.AsyncClient() as client:
                 resp = await client.post(
                     task.webhook_callback_url, data=payload, headers=headers, timeout=httpx.Timeout(30.0)
                 )
-            if resp.status_code == 200:
+            if resp.status_code >= 200 and resp.status_code < 300:
                 LOG.info(
                     "Webhook sent successfully",
                     task_id=task.task_id,
@@ -2305,7 +2355,7 @@ class ForgeAgent:
             for key, value in updates.items()
             if getattr(step, key) != value and key != "output"
         }
-        LOG.info(
+        LOG.debug(
             "Updating step in db",
             task_id=step.task_id,
             step_id=step.step_id,
@@ -2611,10 +2661,18 @@ class ForgeAgent:
             and task.organization_id
         ):
             LOG.info("Need verification code", step_id=step.step_id)
+            workflow_id = workflow_permanent_id = None
+            if task.workflow_run_id:
+                workflow_run = await app.DATABASE.get_workflow_run(task.workflow_run_id)
+                if workflow_run:
+                    workflow_id = workflow_run.workflow_id
+                    workflow_permanent_id = workflow_run.workflow_permanent_id
             verification_code = await poll_verification_code(
                 task.task_id,
                 task.organization_id,
+                workflow_id=workflow_id,
                 workflow_run_id=task.workflow_run_id,
+                workflow_permanent_id=workflow_permanent_id,
                 totp_verification_url=task.totp_verification_url,
                 totp_identifier=task.totp_identifier,
             )
@@ -2629,11 +2687,16 @@ class ForgeAgent:
                 verification_code_check=False,
                 expire_verification_code=True,
             )
+            llm_key_override = task.llm_key
+            run_obj = await app.DATABASE.get_run(run_id=task.task_id, organization_id=task.organization_id)
+            if run_obj and run_obj.task_run_type in CUA_RUN_TYPES:
+                llm_key_override = None
             return await app.LLM_API_HANDLER(
                 prompt=extract_action_prompt,
                 step=step,
                 screenshots=scraped_page.screenshots,
                 prompt_name="extract-actions",
+                llm_key_override=llm_key_override,
             )
         return json_response
 

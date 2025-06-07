@@ -20,7 +20,7 @@ from urllib.parse import quote
 import filetype
 import structlog
 from email_validator import EmailNotValidError, validate_email
-from jinja2 import Template
+from jinja2.sandbox import SandboxedEnvironment
 from playwright.async_api import Page
 from pydantic import BaseModel, Field
 from pypdf import PdfReader
@@ -77,6 +77,7 @@ from skyvern.webeye.browser_factory import BrowserState
 from skyvern.webeye.utils.page import SkyvernFrame
 
 LOG = structlog.get_logger()
+jinja_sandbox_env = SandboxedEnvironment()
 
 
 class BlockType(StrEnum):
@@ -126,6 +127,7 @@ class Block(BaseModel, abc.ABC):
     block_type: BlockType
     output_parameter: OutputParameter
     continue_on_failure: bool = False
+    model: dict[str, Any] | None = None
 
     async def record_output_parameter_value(
         self,
@@ -183,7 +185,7 @@ class Block(BaseModel, abc.ABC):
     ) -> str:
         if not potential_template:
             return potential_template
-        template = Template(potential_template)
+        template = jinja_sandbox_env.from_string(potential_template)
 
         block_reference_data: dict[str, Any] = workflow_run_context.get_block_metadata(self.label)
         template_data = workflow_run_context.values.copy()
@@ -197,6 +199,15 @@ class Block(BaseModel, abc.ABC):
                 )
 
         template_data[self.label] = block_reference_data
+
+        # inject the forloop metadata as global variables
+        if "current_index" in block_reference_data:
+            template_data["current_index"] = block_reference_data["current_index"]
+        if "current_item" in block_reference_data:
+            template_data["current_item"] = block_reference_data["current_item"]
+        if "current_value" in block_reference_data:
+            template_data["current_value"] = block_reference_data["current_value"]
+
         return template.render(template_data)
 
     @classmethod
@@ -367,6 +378,7 @@ class BaseTaskBlock(Block):
     totp_identifier: str | None = None
     cache_actions: bool = False
     complete_verification: bool = True
+    include_action_history_in_verification: bool = False
 
     def get_all_parameters(
         self,
@@ -942,7 +954,9 @@ class ForLoopBlock(Block):
                 metadata: BlockMetadata = {
                     "current_index": loop_idx,
                     "current_value": loop_over_value,
+                    "current_item": loop_over_value,
                 }
+                workflow_run_context.update_block_metadata(self.label, metadata)
                 workflow_run_context.update_block_metadata(loop_block.label, metadata)
 
                 original_loop_block = loop_block
