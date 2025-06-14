@@ -24,8 +24,13 @@ ALGORITHM = "HS256"
 
 
 async def get_current_org(
-    x_api_key: Annotated[str | None, Header()] = None,
-    authorization: Annotated[str | None, Header()] = None,
+    x_api_key: Annotated[
+        str | None,
+        Header(
+            description="Skyvern API key for authentication. API key can be found at https://app.skyvern.com/settings."
+        ),
+    ] = None,
+    authorization: Annotated[str | None, Header(include_in_schema=False)] = None,
 ) -> Organization:
     if not x_api_key and not authorization:
         raise HTTPException(
@@ -107,6 +112,7 @@ async def _get_current_org_cached(x_api_key: str, db: AgentDB) -> Organization:
 
     organization = await db.get_organization(organization_id=api_key_data.sub)
     if not organization:
+        LOG.warning("Organization not found", organization_id=api_key_data.sub, **payload)
         raise HTTPException(status_code=404, detail="Organization not found")
 
     # check if the token exists in the database

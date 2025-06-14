@@ -19,6 +19,7 @@ from skyvern import analytics
 from skyvern.config import settings
 from skyvern.constants import (
     BROWSER_DOWNLOADING_SUFFIX,
+    DEFAULT_MAX_SCREENSHOT_SCROLLING_TIMES,
     GET_DOWNLOADED_FILES_TIMEOUT,
     SAVE_DOWNLOADED_FILES_TIMEOUT,
     SCRAPE_TYPE_ORDER,
@@ -58,7 +59,8 @@ from skyvern.forge.sdk.api.files import (
     rename_file,
     wait_for_download_finished,
 )
-from skyvern.forge.sdk.api.llm.api_handler_factory import LLMCaller, LLMCallerManager
+from skyvern.forge.sdk.api.llm.api_handler_factory import LLMAPIHandlerFactory, LLMCaller, LLMCallerManager
+from skyvern.forge.sdk.api.llm.ui_tars_llm_caller import UITarsLLMCaller
 from skyvern.forge.sdk.artifact.models import ArtifactType
 from skyvern.forge.sdk.core import skyvern_context
 from skyvern.forge.sdk.core.security import generate_skyvern_webhook_headers
@@ -72,12 +74,13 @@ from skyvern.forge.sdk.workflow.context_manager import WorkflowRunContext
 from skyvern.forge.sdk.workflow.models.block import ActionBlock, BaseTaskBlock, ValidationBlock
 from skyvern.forge.sdk.workflow.models.workflow import Workflow, WorkflowRun, WorkflowRunStatus
 from skyvern.schemas.runs import CUA_ENGINES, CUA_RUN_TYPES, RunEngine
+from skyvern.services import run_service
 from skyvern.utils.image_resizer import Resolution
 from skyvern.utils.prompt_engine import load_prompt_with_elements
+from skyvern.webeye.actions.action_types import ActionType
 from skyvern.webeye.actions.actions import (
     Action,
     ActionStatus,
-    ActionType,
     CompleteAction,
     CompleteVerifyResult,
     DecisiveAction,
@@ -90,7 +93,12 @@ from skyvern.webeye.actions.actions import (
 from skyvern.webeye.actions.caching import retrieve_action_plan
 from skyvern.webeye.actions.handler import ActionHandler, poll_verification_code
 from skyvern.webeye.actions.models import AgentStepOutput, DetailedAgentStepOutput
-from skyvern.webeye.actions.parse_actions import parse_actions, parse_anthropic_actions, parse_cua_actions
+from skyvern.webeye.actions.parse_actions import (
+    parse_actions,
+    parse_anthropic_actions,
+    parse_cua_actions,
+    parse_ui_tars_actions,
+)
 from skyvern.webeye.actions.responses import ActionResult, ActionSuccess
 from skyvern.webeye.browser_factory import BrowserState
 from skyvern.webeye.scraper.scraper import ElementTreeFormat, ScrapedPage, scrape_website
@@ -109,9 +117,9 @@ class ForgeAgent:
     def __init__(self) -> None:
         if settings.ADDITIONAL_MODULES:
             for module in settings.ADDITIONAL_MODULES:
-                LOG.info("Loading additional module", module=module)
+                LOG.debug("Loading additional module", module=module)
                 __import__(module)
-            LOG.info(
+            LOG.debug(
                 "Additional modules loaded",
                 modules=settings.ADDITIONAL_MODULES,
             )
@@ -172,6 +180,9 @@ class ForgeAgent:
             retry=task_retry,
             max_steps_per_run=task_block.max_steps_per_run,
             error_code_mapping=task_block.error_code_mapping,
+            include_action_history_in_verification=task_block.include_action_history_in_verification,
+            model=task_block.model,
+            max_screenshot_scrolling_times=workflow_run.max_screenshot_scrolling_times,
         )
         LOG.info(
             "Created a new task for workflow run",
@@ -207,7 +218,7 @@ class ForgeAgent:
         )
         return task, step
 
-    async def create_task(self, task_request: TaskRequest, organization_id: str | None = None) -> Task:
+    async def create_task(self, task_request: TaskRequest, organization_id: str) -> Task:
         webhook_callback_url = str(task_request.webhook_callback_url) if task_request.webhook_callback_url else None
         totp_verification_url = str(task_request.totp_verification_url) if task_request.totp_verification_url else None
         task = await app.DATABASE.create_task(
@@ -226,6 +237,9 @@ class ForgeAgent:
             extracted_information_schema=task_request.extracted_information_schema,
             error_code_mapping=task_request.error_code_mapping,
             application=task_request.application,
+            include_action_history_in_verification=task_request.include_action_history_in_verification,
+            model=task_request.model,
+            max_screenshot_scrolling_times=task_request.max_screenshot_scrolling_times,
         )
         LOG.info(
             "Created new task",
@@ -378,13 +392,30 @@ class ForgeAgent:
             if page := await browser_state.get_working_page():
                 await self.register_async_operations(organization, task, page)
 
-            llm_caller = LLMCallerManager.get_llm_caller(task.task_id)
             if engine == RunEngine.anthropic_cua and not llm_caller:
-                # llm_caller = LLMCaller(llm_key="BEDROCK_ANTHROPIC_CLAUDE3.5_SONNET_INFERENCE_PROFILE")
+                # see if the llm_caller is already set in memory
                 llm_caller = LLMCallerManager.get_llm_caller(task.task_id)
                 if not llm_caller:
-                    llm_caller = LLMCaller(llm_key=settings.ANTHROPIC_CUA_LLM_KEY, screenshot_scaling_enabled=True)
-                    LLMCallerManager.set_llm_caller(task.task_id, llm_caller)
+                    # if not, create a new llm_caller
+                    llm_key = task.llm_key
+                    llm_caller = LLMCaller(
+                        llm_key=llm_key or settings.ANTHROPIC_CUA_LLM_KEY, screenshot_scaling_enabled=True
+                    )
+
+            if engine == RunEngine.ui_tars and not llm_caller:
+                # see if the llm_caller is already set in memory
+                llm_caller = LLMCallerManager.get_llm_caller(task.task_id)
+                if not llm_caller:
+                    # create a new UI-TARS llm_caller
+                    llm_key = task.llm_key or settings.VOLCENGINE_CUA_LLM_KEY
+                    llm_caller = UITarsLLMCaller(llm_key=llm_key, screenshot_scaling_enabled=True)
+                    llm_caller.initialize_conversation(task)
+
+            # TODO: remove the code after migrating everything to llm callers
+            # currently, only anthropic cua and ui_tars tasks use llm_caller
+            if engine in [RunEngine.anthropic_cua, RunEngine.ui_tars] and llm_caller:
+                LLMCallerManager.set_llm_caller(task.task_id, llm_caller)
+
             step, detailed_output = await self.agent_step(
                 task,
                 step,
@@ -537,6 +568,7 @@ class ForgeAgent:
                     complete_verification=complete_verification,
                     engine=engine,
                     cua_response=cua_response_param,
+                    llm_caller=llm_caller,
                 )
             elif settings.execute_all_steps() and next_step:
                 return await self.execute_step(
@@ -550,6 +582,7 @@ class ForgeAgent:
                     complete_verification=complete_verification,
                     engine=engine,
                     cua_response=cua_response_param,
+                    llm_caller=llm_caller,
                 )
             else:
                 LOG.info(
@@ -841,6 +874,19 @@ class ForgeAgent:
                     scraped_page=scraped_page,
                     llm_caller=llm_caller,
                 )
+            elif engine == RunEngine.ui_tars and not app.EXPERIMENTATION_PROVIDER.is_feature_enabled_cached(
+                "DISABLE_UI_TARS_CUA",
+                task.workflow_run_id or task.task_id,
+                properties={"organization_id": task.organization_id},
+            ):
+                assert llm_caller is not None
+                actions = await self._generate_ui_tars_actions(
+                    task=task,
+                    step=step,
+                    scraped_page=scraped_page,
+                    llm_caller=llm_caller,
+                )
+
             else:
                 using_cached_action_plan = False
                 if not task.navigation_goal and not isinstance(task_block, ValidationBlock):
@@ -852,9 +898,16 @@ class ForgeAgent:
                 ):
                     using_cached_action_plan = True
                 else:
+                    llm_key_override = task.llm_key
+                    # FIXME: Redundant engine check?
                     if engine in CUA_ENGINES:
                         self.async_operation_pool.run_operation(task.task_id, AgentPhase.llm)
-                    json_response = await app.LLM_API_HANDLER(
+                        llm_key_override = None
+
+                    llm_api_handler = LLMAPIHandlerFactory.get_override_llm_api_handler(
+                        llm_key_override, default=app.LLM_API_HANDLER
+                    )
+                    json_response = await llm_api_handler(
                         prompt=extract_action_prompt,
                         prompt_name="extract-actions",
                         step=step,
@@ -1033,6 +1086,7 @@ class ForgeAgent:
                 for result in results:
                     result.step_retry_number = step.retry_index
                     result.step_order = step.order
+                step.output = detailed_agent_step_output.to_agent_step_output()
                 action_results.extend(results)
                 # Check the last result for this action. If that succeeded, assume the entire action is successful
                 if results and results[-1].success:
@@ -1430,6 +1484,7 @@ class ForgeAgent:
         if not llm_caller.message_history:
             llm_response = await llm_caller.call(
                 prompt=task.navigation_goal,
+                step=step,
                 screenshots=scraped_page.screenshots,
                 use_message_history=True,
                 tools=tools,
@@ -1440,6 +1495,7 @@ class ForgeAgent:
             )
         else:
             llm_response = await llm_caller.call(
+                step=step,
                 screenshots=scraped_page.screenshots,
                 use_message_history=True,
                 tools=tools,
@@ -1460,8 +1516,59 @@ class ForgeAgent:
         )
         return actions
 
-    @staticmethod
-    async def complete_verify(page: Page, scraped_page: ScrapedPage, task: Task, step: Step) -> CompleteVerifyResult:
+    async def _generate_ui_tars_actions(
+        self,
+        task: Task,
+        step: Step,
+        scraped_page: ScrapedPage,
+        llm_caller: LLMCaller,
+    ) -> list[Action]:
+        """Generate actions using UI-TARS (Seed1.5-VL) model through the LLMCaller pattern."""
+
+        LOG.info(
+            "UI-TARS action generation starts",
+            task_id=task.task_id,
+            step_id=step.step_id,
+            step_order=step.order,
+        )
+
+        # Ensure we have a UITarsLLMCaller instance
+        if not isinstance(llm_caller, UITarsLLMCaller):
+            raise ValueError(f"Expected UITarsLLMCaller, got {type(llm_caller)}")
+
+        # Add the current screenshot to conversation
+        if scraped_page.screenshots:
+            llm_caller.add_screenshot(scraped_page.screenshots[0])
+        else:
+            LOG.error("No screenshots found, skipping UI-TARS action generation")
+            raise ValueError("No screenshots found, skipping UI-TARS action generation")
+
+        # Generate response using the LLMCaller
+        response_content = await llm_caller.generate_ui_tars_response(step)
+
+        LOG.info(f"UI-TARS raw response: {response_content}")
+
+        window_dimension = (
+            cast(Resolution, scraped_page.window_dimension)
+            if scraped_page.window_dimension
+            else Resolution(width=1920, height=1080)
+        )
+        LOG.info(f"UI-TARS browser window dimension: {window_dimension}")
+
+        actions = await parse_ui_tars_actions(task, step, response_content, window_dimension)
+
+        LOG.info(
+            "UI-TARS action generation completed",
+            task_id=task.task_id,
+            step_id=step.step_id,
+            actions_count=len(actions),
+        )
+
+        return actions
+
+    async def complete_verify(
+        self, page: Page, scraped_page: ScrapedPage, task: Task, step: Step
+    ) -> CompleteVerifyResult:
         LOG.info(
             "Checking if user goal is achieved after re-scraping the page",
             task_id=task.task_id,
@@ -1470,10 +1577,16 @@ class ForgeAgent:
         )
         run_obj = await app.DATABASE.get_run(run_id=task.task_id, organization_id=task.organization_id)
         scroll = True
+        llm_key_override = task.llm_key
         if run_obj and run_obj.task_run_type in CUA_RUN_TYPES:
             scroll = False
+            llm_key_override = None
 
         scraped_page_refreshed = await scraped_page.refresh(draw_boxes=False, scroll=scroll)
+
+        actions_and_results_str = ""
+        if task.include_action_history_in_verification:
+            actions_and_results_str = await self._get_action_results(task, current_step=step)
 
         verification_prompt = load_prompt_with_elements(
             scraped_page=scraped_page_refreshed,
@@ -1482,11 +1595,16 @@ class ForgeAgent:
             navigation_goal=task.navigation_goal,
             navigation_payload=task.navigation_payload,
             complete_criterion=task.complete_criterion,
+            action_history=actions_and_results_str,
             local_datetime=datetime.now(skyvern_context.ensure_context().tz_info).isoformat(),
         )
 
         # this prompt is critical to our agent so let's use the primary LLM API handler
-        verification_result = await app.LLM_API_HANDLER(
+
+        llm_api_handler = LLMAPIHandlerFactory.get_override_llm_api_handler(
+            llm_key_override, default=app.LLM_API_HANDLER
+        )
+        verification_result = await llm_api_handler(
             prompt=verification_prompt,
             step=step,
             screenshots=scraped_page_refreshed.screenshots,
@@ -1494,12 +1612,11 @@ class ForgeAgent:
         )
         return CompleteVerifyResult.model_validate(verification_result)
 
-    @staticmethod
     async def check_user_goal_complete(
-        page: Page, scraped_page: ScrapedPage, task: Task, step: Step
+        self, page: Page, scraped_page: ScrapedPage, task: Task, step: Step
     ) -> CompleteAction | None:
         try:
-            verification_result = await app.agent.complete_verify(
+            verification_result = await self.complete_verify(
                 page=page,
                 scraped_page=scraped_page,
                 task=task,
@@ -1536,12 +1653,23 @@ class ForgeAgent:
         if not working_page:
             raise BrowserStateMissingPage()
 
-        fullpage_screenshot = True
+        context = skyvern_context.ensure_context()
+        scrolling_number = context.max_screenshot_scrolling_times
+        if scrolling_number is None:
+            scrolling_number = DEFAULT_MAX_SCREENSHOT_SCROLLING_TIMES
+
         if engine in CUA_ENGINES:
-            fullpage_screenshot = False
+            scrolling_number = 0
 
         try:
-            screenshot = await browser_state.take_screenshot(full_page=fullpage_screenshot)
+            screenshot = await browser_state.take_post_action_screenshot(
+                scrolling_number=scrolling_number,
+                use_playwright_fullpage=app.EXPERIMENTATION_PROVIDER.is_feature_enabled_cached(
+                    "ENABLE_PLAYWRIGHT_FULLPAGE",
+                    task.workflow_run_id or task.task_id,
+                    properties={"organization_id": task.organization_id},
+                ),
+            )
             await app.ARTIFACT_MANAGER.create_artifact(
                 step=step,
                 artifact_type=ArtifactType.SCREENSHOT_ACTION,
@@ -1806,7 +1934,10 @@ class ForgeAgent:
             prompt = prompt_engine.load_prompt(
                 "infer-action-type", navigation_goal=navigation_goal, prompt_name="infer-action-type"
             )
-            json_response = await app.LLM_API_HANDLER(prompt=prompt, step=step, prompt_name="infer-action-type")
+            llm_api_handler = LLMAPIHandlerFactory.get_override_llm_api_handler(
+                task.llm_key, default=app.LLM_API_HANDLER
+            )
+            json_response = await llm_api_handler(prompt=prompt, step=step, prompt_name="infer-action-type")
             if json_response.get("error"):
                 raise FailedToParseActionInstruction(
                     reason=json_response.get("thought"), error_type=json_response.get("error")
@@ -1876,11 +2007,20 @@ class ForgeAgent:
                 current_context.totp_codes.pop(task.task_id)
         return final_navigation_payload
 
-    async def _get_action_results(self, task: Task) -> str:
+    async def _get_action_results(self, task: Task, current_step: Step | None = None) -> str:
+        """
+        Get the action results from the last app.SETTINGS.PROMPT_ACTION_HISTORY_WINDOW steps.
+        If current_step is provided, the current executing step will be included in the action history.
+        Default is excluding the current executing step from the action history.
+        """
+
         # Get action results from the last app.SETTINGS.PROMPT_ACTION_HISTORY_WINDOW steps
         steps = await app.DATABASE.get_task_steps(task_id=task.task_id, organization_id=task.organization_id)
         # the last step is always the newly created one and it should be excluded from the history window
         window_steps = steps[-1 - settings.PROMPT_ACTION_HISTORY_WINDOW : -1]
+        if current_step:
+            window_steps.append(current_step)
+
         actions_and_results: list[tuple[Action, list[ActionResult]]] = []
         for window_step in window_steps:
             if window_step.output and window_step.output.actions_and_results:
@@ -1938,10 +2078,11 @@ class ForgeAgent:
                         )
                         return action_result.data
 
-        LOG.warning(
-            "Failed to find extracted information for task",
-            task_id=task.task_id,
-        )
+        if task.data_extraction_goal:
+            LOG.warning(
+                "Failed to find extracted information for task",
+                task_id=task.task_id,
+            )
         return None
 
     async def get_failure_reason_for_task(self, task: Task) -> str | None:
@@ -2008,7 +2149,13 @@ class ForgeAgent:
             browser_state = app.BROWSER_MANAGER.get_for_task(task.task_id)
             if browser_state is not None and await browser_state.get_working_page() is not None:
                 try:
-                    screenshot = await browser_state.take_screenshot(full_page=True)
+                    screenshot = await browser_state.take_fullpage_screenshot(
+                        use_playwright_fullpage=app.EXPERIMENTATION_PROVIDER.is_feature_enabled_cached(
+                            "ENABLE_PLAYWRIGHT_FULLPAGE",
+                            task.workflow_run_id or task.task_id,
+                            properties={"organization_id": task.organization_id},
+                        )
+                    )
                     await app.ARTIFACT_MANAGER.create_artifact(
                         step=last_step,
                         artifact_type=ArtifactType.SCREENSHOT_FINAL,
@@ -2058,6 +2205,7 @@ class ForgeAgent:
             return
 
         await self.async_operation_pool.remove_task(task.task_id)
+
         await self.cleanup_browser_and_create_artifacts(
             close_browser_on_completion, last_step, task, browser_session_id=browser_session_id
         )
@@ -2089,23 +2237,36 @@ class ForgeAgent:
             return
 
         task_response = await self.build_task_response(task=task, last_step=last_step)
-
-        # send task_response to the webhook callback url
-        payload = task_response.model_dump_json(exclude={"request"})
-        headers = generate_skyvern_webhook_headers(payload=payload, api_key=api_key)
-        LOG.info(
-            "Sending task response to webhook callback url",
-            task_id=task.task_id,
-            webhook_callback_url=task.webhook_callback_url,
-            payload=payload,
-            headers=headers,
-        )
+        # try to build the new TaskRunResponse for backward compatibility
+        task_run_response_json: str | None = None
         try:
+            run_response = await run_service.get_run_response(
+                run_id=task.task_id,
+                organization_id=task.organization_id,
+            )
+            if run_response is not None:
+                task_run_response_json = run_response.model_dump_json(exclude={"run_request"})
+
+            # send task_response to the webhook callback url
+            payload_json = task_response.model_dump_json(exclude={"request"})
+            payload_dict = json.loads(payload_json)
+            if task_run_response_json:
+                payload_dict.update(json.loads(task_run_response_json))
+            payload = json.dumps(payload_dict, separators=(",", ":"), ensure_ascii=False)
+            headers = generate_skyvern_webhook_headers(payload=payload, api_key=api_key)
+            LOG.info(
+                "Sending task response to webhook callback url",
+                task_id=task.task_id,
+                webhook_callback_url=task.webhook_callback_url,
+                payload=payload,
+                headers=headers,
+            )
+
             async with httpx.AsyncClient() as client:
                 resp = await client.post(
                     task.webhook_callback_url, data=payload, headers=headers, timeout=httpx.Timeout(30.0)
                 )
-            if resp.status_code == 200:
+            if resp.status_code >= 200 and resp.status_code < 300:
                 LOG.info(
                     "Webhook sent successfully",
                     task_id=task.task_id,
@@ -2305,7 +2466,7 @@ class ForgeAgent:
             for key, value in updates.items()
             if getattr(step, key) != value and key != "output"
         }
-        LOG.info(
+        LOG.debug(
             "Updating step in db",
             task_id=step.task_id,
             step_id=step.step_id,
@@ -2395,10 +2556,25 @@ class ForgeAgent:
                 step_retry=step.retry_index,
                 max_retries=settings.MAX_RETRIES_PER_STEP,
             )
+            browser_state = app.BROWSER_MANAGER.get_for_task(task_id=task.task_id, workflow_run_id=task.workflow_run_id)
+            page = None
+            if browser_state is not None:
+                page = await browser_state.get_working_page()
+
+            failure_reason = await self.summary_failure_reason_for_max_retries(
+                organization=organization,
+                task=task,
+                step=step,
+                page=page,
+                max_retries=max_retries_per_step,
+            )
+
             await self.update_task(
                 task,
                 TaskStatus.failed,
-                failure_reason=f"Max retries per step ({max_retries_per_step}) exceeded",
+                failure_reason=(
+                    f"Max retries per step ({max_retries_per_step}) exceeded. Possible failure reasons: {failure_reason}"
+                ),
             )
             return None
         else:
@@ -2478,6 +2654,72 @@ class ForgeAgent:
             if steps_results:
                 last_step_result = steps_results[-1]
                 return f"Step {last_step_result['order']}: {last_step_result['actions_result']}"
+            return ""
+
+    async def summary_failure_reason_for_max_retries(
+        self,
+        organization: Organization,
+        task: Task,
+        step: Step,
+        page: Page | None,
+        max_retries: int,
+    ) -> str:
+        html = ""
+        screenshots: list[bytes] = []
+        steps_results = []
+        try:
+            steps = await app.DATABASE.get_task_steps(
+                task_id=task.task_id, organization_id=organization.organization_id
+            )
+            for step_cnt, cur_step in enumerate(steps[-max_retries:]):
+                if cur_step.output and cur_step.output.actions_and_results:
+                    action_result_summary: list[str] = []
+                    step_result: dict[str, Any] = {
+                        "order": step_cnt,
+                    }
+                    for action, action_results in cur_step.output.actions_and_results:
+                        if len(action_results) == 0:
+                            continue
+                        last_result = action_results[-1]
+                        if last_result.success:
+                            continue
+                        reason = last_result.exception_message or ""
+                        action_result_summary.append(
+                            f"{action.reasoning}(action_type={action.action_type}, result=failed, reason={reason})"
+                        )
+                    step_result["actions_result"] = action_result_summary
+                    steps_results.append(step_result)
+
+            if page is not None:
+                skyvern_frame = await SkyvernFrame.create_instance(frame=page)
+                html = await skyvern_frame.get_content()
+                screenshots = await SkyvernFrame.take_split_screenshots(page=page, url=page.url)
+
+            prompt = prompt_engine.load_prompt(
+                "summarize-max-retries-reason",
+                navigation_goal=task.navigation_goal,
+                navigation_payload=task.navigation_payload,
+                steps=steps_results,
+                page_html=html,
+                max_retries=max_retries,
+                local_datetime=datetime.now(skyvern_context.ensure_context().tz_info).isoformat(),
+            )
+            json_response = await app.LLM_API_HANDLER(
+                prompt=prompt,
+                screenshots=screenshots,
+                step=step,
+                prompt_name="summarize-max-retries-reason",
+            )
+            return json_response.get("reasoning", "")
+        except Exception:
+            LOG.warning(
+                "Failed to summarize the failure reason for max retries",
+                task_id=task.task_id,
+                step_id=step.step_id,
+            )
+            if steps_results:
+                last_step_result = steps_results[-1]
+                return f"Retry Step {last_step_result['order']}: {last_step_result['actions_result']}"
             return ""
 
     async def handle_completed_step(
@@ -2611,10 +2853,18 @@ class ForgeAgent:
             and task.organization_id
         ):
             LOG.info("Need verification code", step_id=step.step_id)
+            workflow_id = workflow_permanent_id = None
+            if task.workflow_run_id:
+                workflow_run = await app.DATABASE.get_workflow_run(task.workflow_run_id)
+                if workflow_run:
+                    workflow_id = workflow_run.workflow_id
+                    workflow_permanent_id = workflow_run.workflow_permanent_id
             verification_code = await poll_verification_code(
                 task.task_id,
                 task.organization_id,
+                workflow_id=workflow_id,
                 workflow_run_id=task.workflow_run_id,
+                workflow_permanent_id=workflow_permanent_id,
                 totp_verification_url=task.totp_verification_url,
                 totp_identifier=task.totp_identifier,
             )
@@ -2629,7 +2879,14 @@ class ForgeAgent:
                 verification_code_check=False,
                 expire_verification_code=True,
             )
-            return await app.LLM_API_HANDLER(
+            llm_key_override = task.llm_key
+            run_obj = await app.DATABASE.get_run(run_id=task.task_id, organization_id=task.organization_id)
+            if run_obj and run_obj.task_run_type in CUA_RUN_TYPES:
+                llm_key_override = None
+            llm_api_handler = LLMAPIHandlerFactory.get_override_llm_api_handler(
+                llm_key_override, default=app.LLM_API_HANDLER
+            )
+            return await llm_api_handler(
                 prompt=extract_action_prompt,
                 step=step,
                 screenshots=scraped_page.screenshots,

@@ -1,4 +1,5 @@
-FROM python:3.11 as requirements-stage
+FROM python:3.11 AS requirements-stage
+# Run `skyvern init llm` before building to generate the .env file
 
 WORKDIR /tmp
 RUN pip install poetry
@@ -14,22 +15,22 @@ RUN pip install --upgrade pip setuptools wheel
 RUN pip install --no-cache-dir --upgrade -r requirements.txt
 RUN playwright install-deps
 RUN playwright install
-RUN apt-get install -y xauth x11-apps netpbm curl && apt-get clean
+RUN apt-get install -y xauth x11-apps netpbm gpg ca-certificates && apt-get clean
 
-# nvm env vars
-RUN mkdir -p /usr/local/nvm
-ENV NVM_DIR /usr/local/nvm
-ENV NODE_VERSION v20.12.2
-# install nvm
-RUN curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.39.7/install.sh | bash
-# install node and npm
-RUN /bin/bash -c "source $NVM_DIR/nvm.sh && nvm install $NODE_VERSION && nvm use --delete-prefix $NODE_VERSION"
-# add node and npm to the PATH
-ENV NODE_PATH $NVM_DIR/versions/node/$NODE_VERSION/bin
-ENV PATH $NODE_PATH:$PATH
-# confirm installation
-RUN npm -v
-RUN node -v
+COPY .nvmrc /app/.nvmrc
+COPY nodesource-repo.gpg.key /tmp/nodesource-repo.gpg.key
+RUN cat /tmp/nodesource-repo.gpg.key | gpg --dearmor -o /etc/apt/keyrings/nodesource.gpg && \
+    NODE_MAJOR=$(cut -d. -f1 < /app/.nvmrc) && \
+    echo "deb [signed-by=/etc/apt/keyrings/nodesource.gpg] https://deb.nodesource.com/node_${NODE_MAJOR}.x nodistro main" >> /etc/apt/sources.list.d/nodesource.list && \
+    apt-get update && \
+    apt-get install -y nodejs && \
+    apt-get clean && \
+    rm -rf /var/lib/apt/lists/* && \
+    rm /tmp/nodesource-repo.gpg.key && \
+    # confirm installation
+    npm -v && node -v
+
+
 # install bitwarden cli
 RUN npm install -g @bitwarden/cli@2024.9.0
 # checking bw version also initializes the bw config
@@ -37,7 +38,7 @@ RUN bw --version
 
 COPY . /app
 
-ENV PYTHONPATH="/app:$PYTHONPATH"
+ENV PYTHONPATH="/app"
 ENV VIDEO_PATH=/data/videos
 ENV HAR_PATH=/data/har
 ENV LOG_PATH=/data/log

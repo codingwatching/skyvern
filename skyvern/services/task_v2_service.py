@@ -1,3 +1,4 @@
+import json
 import os
 import random
 import string
@@ -19,6 +20,7 @@ from skyvern.exceptions import (
 )
 from skyvern.forge import app
 from skyvern.forge.prompts import prompt_engine
+from skyvern.forge.sdk.api.llm.api_handler_factory import LLMAPIHandlerFactory
 from skyvern.forge.sdk.artifact.models import ArtifactType
 from skyvern.forge.sdk.core import skyvern_context
 from skyvern.forge.sdk.core.hashing import generate_url_hash
@@ -58,7 +60,7 @@ from skyvern.forge.sdk.workflow.models.yaml import (
     WorkflowCreateYAMLRequest,
     WorkflowDefinitionYAML,
 )
-from skyvern.schemas.runs import ProxyLocation, RunType
+from skyvern.schemas.runs import ProxyLocation, RunEngine, RunType, TaskRunRequest, TaskRunResponse
 from skyvern.utils.prompt_engine import load_prompt_with_elements
 from skyvern.webeye.browser_factory import BrowserState
 from skyvern.webeye.scraper.scraper import ScrapedPage, scrape_website
@@ -67,7 +69,7 @@ from skyvern.webeye.utils.page import SkyvernFrame
 LOG = structlog.get_logger()
 DEFAULT_WORKFLOW_TITLE = "New Workflow"
 RANDOM_STRING_POOL = string.ascii_letters + string.digits
-DEFAULT_MAX_ITERATIONS = 10
+DEFAULT_MAX_ITERATIONS = 13
 
 MINI_GOAL_TEMPLATE = """Achieve the following mini goal and once it's achieved, complete:
 ```{mini_goal}```
@@ -162,6 +164,8 @@ async def initialize_task_v2(
     extracted_information_schema: dict | list | str | None = None,
     error_code_mapping: dict | None = None,
     create_task_run: bool = False,
+    model: dict[str, Any] | None = None,
+    max_screenshot_scrolling_times: int | None = None,
 ) -> TaskV2:
     task_v2 = await app.DATABASE.create_task_v2(
         prompt=user_prompt,
@@ -172,11 +176,14 @@ async def initialize_task_v2(
         proxy_location=proxy_location,
         extracted_information_schema=extracted_information_schema,
         error_code_mapping=error_code_mapping,
+        model=model,
+        max_screenshot_scrolling_times=max_screenshot_scrolling_times,
     )
     # set task_v2_id in context
     context = skyvern_context.current()
     if context:
         context.task_v2_id = task_v2.observer_cruise_id
+        context.max_screenshot_scrolling_times = max_screenshot_scrolling_times
 
     thought = await app.DATABASE.create_thought(
         task_v2_id=task_v2.observer_cruise_id,
@@ -217,7 +224,9 @@ async def initialize_task_v2(
         )
         workflow_run = await app.WORKFLOW_SERVICE.setup_workflow_run(
             request_id=None,
-            workflow_request=WorkflowRequestBody(),
+            workflow_request=WorkflowRequestBody(
+                max_screenshot_scrolling_times=max_screenshot_scrolling_times,
+            ),
             workflow_permanent_id=new_workflow.workflow_permanent_id,
             organization=organization,
             version=None,
@@ -355,6 +364,7 @@ async def run_task_v2(
                 workflow_run=workflow_run,
                 browser_session_id=browser_session_id,
                 close_browser_on_completion=browser_session_id is None,
+                need_call_webhook=False,
             )
         else:
             LOG.warning("Workflow or workflow run not found")
@@ -385,6 +395,19 @@ async def run_task_v2_helper(
         LOG.error(
             "Task v2 url or prompt not found",
             task_v2_id=task_v2_id,
+            organization_id=organization_id,
+            prompt=task_v2.prompt,
+            url=task_v2.url,
+        )
+        failure_reason = ""
+        if not task_v2.prompt:
+            failure_reason = "Task prompt is missing"
+        elif not task_v2.url:
+            failure_reason = "Task url is missing"
+        await mark_task_v2_as_failed(
+            task_v2_id=task_v2_id,
+            workflow_run_id=task_v2.workflow_run_id,
+            failure_reason=failure_reason,
             organization_id=organization_id,
         )
         return None, None, task_v2
@@ -436,6 +459,7 @@ async def run_task_v2_helper(
             request_id=request_id,
             task_v2_id=task_v2_id,
             browser_session_id=browser_session_id,
+            max_screenshot_scrolling_times=task_v2.max_screenshot_scrolling_times,
         )
     )
 
@@ -494,8 +518,8 @@ async def run_task_v2_helper(
         browser_state = app.BROWSER_MANAGER.get_for_workflow_run(
             workflow_run_id=workflow_run_id, parent_workflow_run_id=workflow_run.parent_workflow_run_id
         )
+        fallback_occurred = False
         if browser_state is None:
-            fallback_occurred = False
             try:
                 browser_state = await app.BROWSER_MANAGER.get_or_create_for_workflow_run(
                     workflow_run=workflow_run,
@@ -600,7 +624,10 @@ async def run_task_v2_helper(
                 thought_type=ThoughtType.plan,
                 thought_scenario=ThoughtScenario.generate_plan,
             )
-            task_v2_response = await app.LLM_API_HANDLER(
+            llm_api_handler = LLMAPIHandlerFactory.get_override_llm_api_handler(
+                task_v2.llm_key, default=app.LLM_API_HANDLER
+            )
+            task_v2_response = await llm_api_handler(
                 prompt=task_v2_prompt,
                 screenshots=scraped_page.screenshots,
                 thought=thought,
@@ -750,6 +777,7 @@ async def run_task_v2_helper(
             proxy_location=task_v2.proxy_location or ProxyLocation.RESIDENTIAL,
             workflow_definition=workflow_definition_yaml,
             status=workflow.status,
+            max_screenshot_scrolling_times=task_v2.max_screenshot_scrolling_times,
         )
         LOG.info("Creating workflow from request", workflow_create_request=workflow_create_request)
         workflow = await app.WORKFLOW_SERVICE.create_workflow_from_request(
@@ -1076,16 +1104,14 @@ async def _generate_loop_task(
         output_parameter=loop_value_extraction_output_parameter,
         value=extraction_block_result.output_parameter_value,
     )
+    url: str | None = None
     task_parameters: list[PARAMETER_TYPE] = []
     if is_loop_value_link is True:
         LOG.info("Loop values are links", loop_values=loop_values)
         context_parameter_key = url = f"task_in_loop_url_{loop_random_string}"
     else:
         LOG.info("Loop values are not links", loop_values=loop_values)
-        page = await browser_state.get_working_page()
-        url = str(
-            await SkyvernFrame.evaluate(frame=page, expression="() => document.location.href") if page else original_url
-        )
+        url = None
         context_parameter_key = "target"
 
     # create ContextParameter for the value
@@ -1332,12 +1358,9 @@ def _generate_random_string(length: int = 5) -> str:
     return "".join(random.choices(RANDOM_STRING_POOL, k=length))
 
 
-async def get_thought_timelines(
-    task_v2_id: str,
-    organization_id: str | None = None,
-) -> list[WorkflowRunTimeline]:
+async def get_thought_timelines(*, task_v2_id: str, organization_id: str) -> list[WorkflowRunTimeline]:
     thoughts = await app.DATABASE.get_thoughts(
-        task_v2_id,
+        task_v2_id=task_v2_id,
         organization_id=organization_id,
         thought_types=[
             ThoughtType.plan,
@@ -1578,6 +1601,59 @@ async def _summarize_task_v2(
     )
 
 
+async def build_task_v2_run_response(task_v2: TaskV2) -> TaskRunResponse:
+    """Build TaskRunResponse object for webhook backward compatibility."""
+    from skyvern.services import workflow_service
+
+    workflow_run_resp = None
+    if task_v2.workflow_run_id:
+        try:
+            workflow_run_resp = await workflow_service.get_workflow_run_response(
+                task_v2.workflow_run_id, organization_id=task_v2.organization_id
+            )
+        except Exception:
+            LOG.warning(
+                "Failed to get workflow run response for task v2 webhook",
+                exc_info=True,
+                task_v2_id=task_v2.observer_cruise_id,
+            )
+
+    app_url = None
+    if task_v2.workflow_run_id and task_v2.workflow_permanent_id:
+        app_url = (
+            f"{settings.SKYVERN_APP_URL.rstrip('/')}/workflows/"
+            f"{task_v2.workflow_permanent_id}/{task_v2.workflow_run_id}"
+        )
+
+    return TaskRunResponse(
+        run_id=task_v2.observer_cruise_id,
+        run_type=RunType.task_v2,
+        status=task_v2.status,
+        output=task_v2.output,
+        failure_reason=workflow_run_resp.failure_reason if workflow_run_resp else None,
+        queued_at=task_v2.queued_at,
+        started_at=task_v2.started_at,
+        finished_at=task_v2.finished_at,
+        created_at=task_v2.created_at,
+        modified_at=task_v2.modified_at,
+        recording_url=workflow_run_resp.recording_url if workflow_run_resp else None,
+        screenshot_urls=workflow_run_resp.screenshot_urls if workflow_run_resp else None,
+        downloaded_files=workflow_run_resp.downloaded_files if workflow_run_resp else None,
+        app_url=app_url,
+        run_request=TaskRunRequest(
+            engine=RunEngine.skyvern_v2,
+            prompt=task_v2.prompt or "",
+            url=task_v2.url,
+            webhook_url=task_v2.webhook_callback_url,
+            totp_identifier=task_v2.totp_identifier,
+            totp_url=task_v2.totp_verification_url,
+            proxy_location=task_v2.proxy_location,
+            data_extraction_schema=task_v2.extracted_information_schema,
+            error_code_mapping=task_v2.error_code_mapping,
+        ),
+    )
+
+
 async def send_task_v2_webhook(task_v2: TaskV2) -> None:
     if not task_v2.webhook_callback_url:
         return
@@ -1594,21 +1670,26 @@ async def send_task_v2_webhook(task_v2: TaskV2) -> None:
             task_v2_id=task_v2.observer_cruise_id,
         )
         return
-    # build the task v2 response
-    payload = task_v2.model_dump_json(by_alias=True)
-    headers = generate_skyvern_webhook_headers(payload=payload, api_key=api_key.token)
-    LOG.info(
-        "Sending task v2 response to webhook callback url",
-        task_v2_id=task_v2.observer_cruise_id,
-        webhook_callback_url=task_v2.webhook_callback_url,
-        payload=payload,
-        headers=headers,
-    )
     try:
+        # build the task v2 response with backward compatible data
+        task_run_response = await build_task_v2_run_response(task_v2)
+        task_run_response_json = task_run_response.model_dump_json(exclude={"run_request"})
+        payload_json = task_v2.model_dump_json(by_alias=True)
+        payload_dict = json.loads(payload_json)
+        payload_dict.update(json.loads(task_run_response_json))
+        payload = json.dumps(payload_dict, separators=(",", ":"), ensure_ascii=False)
+        headers = generate_skyvern_webhook_headers(payload=payload, api_key=api_key.token)
+        LOG.info(
+            "Sending task v2 response to webhook callback url",
+            task_v2_id=task_v2.observer_cruise_id,
+            webhook_callback_url=task_v2.webhook_callback_url,
+            payload=payload,
+            headers=headers,
+        )
         resp = await httpx.AsyncClient().post(
             task_v2.webhook_callback_url, data=payload, headers=headers, timeout=httpx.Timeout(30.0)
         )
-        if resp.status_code == 200:
+        if resp.status_code >= 200 and resp.status_code < 300:
             LOG.info(
                 "Task v2 webhook sent successfully",
                 task_v2_id=task_v2.observer_cruise_id,

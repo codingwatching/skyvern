@@ -277,6 +277,7 @@ function hasASPClientControl() {
 }
 
 // from playwright: https://github.com/microsoft/playwright/blob/1b65f26f0287c0352e76673bc5f85bc36c934b55/packages/playwright-core/src/server/injected/domUtils.ts#L100-L119
+// NOTE: According this logic, some elements with aria-hidden won't be considered as invisible. And the result shows they are indeed interactable.
 function isElementVisible(element) {
   // TODO: This is a hack to not check visibility for option elements
   // because they are not visible by default. We check their parent instead for visibility.
@@ -443,6 +444,14 @@ function expectHitTarget(hitPoint, targetElement) {
   return hitParents[0] || document.documentElement;
 }
 
+function getChildElements(element) {
+  if (element.childElementCount !== 0) {
+    return Array.from(element.children);
+  } else {
+    return [];
+  }
+}
+
 function isParent(parent, child) {
   return parent.contains(child);
 }
@@ -584,7 +593,57 @@ function isTableRelatedElement(element) {
   ].includes(tagName);
 }
 
-function isInteractableInput(element) {
+function isDOMNodeRepresentDiv(element) {
+  if (element?.tagName?.toLowerCase() !== "div") {
+    return false;
+  }
+  const style = getElementComputedStyle(element);
+  const children = getChildElements(element);
+  // flex ususally means there are multiple elements in the div as a line or a column
+  // if the children elements are not just one, we should keep it in the HTML tree to represent a tree structure
+  if (style?.display === "flex" && children.length > 1) {
+    return true;
+  }
+  return false;
+}
+
+function isHoverPointerElement(element, hoverStylesMap) {
+  const tagName = element.tagName.toLowerCase();
+  const elementClassName = element.className.toString();
+  const elementCursor = getElementComputedStyle(element)?.cursor;
+  if (elementCursor === "pointer") {
+    return true;
+  }
+
+  // Check if element has hover styles that change cursor to pointer
+  // This is to handle the case where an element's cursor is "auto", but resolves to "pointer" on hover
+  if (elementCursor === "auto") {
+    // TODO: we need a better algorithm to match the selector with better performance
+    for (const [selector, styles] of hoverStylesMap) {
+      let shouldMatch = false;
+      for (const className of element.classList) {
+        if (selector.includes(className)) {
+          shouldMatch = true;
+          break;
+        }
+      }
+      if (shouldMatch || selector.includes(tagName)) {
+        if (element.matches(selector) && styles.cursor === "pointer") {
+          return true;
+        }
+      }
+    }
+  }
+
+  // FIXME: hardcode to fix the bug about hover style now
+  if (elementClassName.includes("hover:cursor-pointer")) {
+    return true;
+  }
+
+  return false;
+}
+
+function isInteractableInput(element, hoverStylesMap) {
   const tagName = element.tagName.toLowerCase();
   if (tagName !== "input") {
     // let other checks decide
@@ -596,7 +655,10 @@ function isInteractableInput(element) {
   // "city", "state", "zip", "country"
   // That's the reason I (Kerem) removed the valid input types check
   var type = element.getAttribute("type")?.toLowerCase().trim() ?? "text";
-  return !isReadonlyElement(element) && type !== "hidden";
+  return (
+    isHoverPointerElement(element, hoverStylesMap) ||
+    (!isReadonlyElement(element) && type !== "hidden")
+  );
 }
 
 function isValidCSSSelector(selector) {
@@ -633,7 +695,7 @@ function isInteractable(element, hoverStylesMap) {
     return false;
   }
 
-  if (isInteractableInput(element)) {
+  if (isInteractableInput(element, hoverStylesMap)) {
     return true;
   }
 
@@ -681,16 +743,18 @@ function isInteractable(element, hoverStylesMap) {
     return true;
   }
 
+  const className = element.className.toString();
+
   if (tagName === "div" || tagName === "span") {
     if (hasAngularClickBinding(element)) {
       return true;
     }
-    if (element.className.toString().includes("blinking-cursor")) {
+    if (className.includes("blinking-cursor")) {
       return true;
     }
     // https://www.oxygenxml.com/dita/1.3/specs/langRef/technicalContent/svg-container.html
     // svg-container is usually used for clickable elements that wrap SVGs
-    if (element.className.toString().includes("svg-container")) {
+    if (className.includes("svg-container")) {
       return true;
     }
   }
@@ -714,7 +778,7 @@ function isInteractable(element, hoverStylesMap) {
 
   if (
     tagName === "li" &&
-    element.className.toString().includes("ui-menu-item")
+    (className.includes("ui-menu-item") || className.includes("dropdown-item"))
   ) {
     return true;
   }
@@ -724,7 +788,7 @@ function isInteractable(element, hoverStylesMap) {
   // demo: https://developers.google.com/maps/documentation/javascript/examples/places-autocomplete-addressform
   if (
     tagName === "div" &&
-    element.className.toString().includes("pac-item") &&
+    className.includes("pac-item") &&
     element.closest('div[class*="pac-container"]')
   ) {
     return true;
@@ -754,33 +818,7 @@ function isInteractable(element, hoverStylesMap) {
     tagName === "svg" ||
     tagName === "strong"
   ) {
-    const elementCursor = getElementComputedStyle(element)?.cursor;
-    if (elementCursor === "pointer") {
-      return true;
-    }
-
-    // Check if element has hover styles that change cursor to pointer
-    // This is to handle the case where an element's cursor is "auto", but resolves to "pointer" on hover
-    if (elementCursor === "auto") {
-      // TODO: we need a better algorithm to match the selector with better performance
-      for (const [selector, styles] of hoverStylesMap) {
-        let shouldMatch = false;
-        for (const className of element.classList) {
-          if (selector.includes(className)) {
-            shouldMatch = true;
-            break;
-          }
-        }
-        if (shouldMatch || selector.includes(tagName)) {
-          if (element.matches(selector) && styles.cursor === "pointer") {
-            return true;
-          }
-        }
-      }
-    }
-
-    // FIXME: hardcode to fix the bug about hover style now
-    if (element.className.toString().includes("hover:cursor-pointer")) {
+    if (isHoverPointerElement(element, hoverStylesMap)) {
       return true;
     }
   }
@@ -791,6 +829,17 @@ function isInteractable(element, hoverStylesMap) {
 
   if (tagName === "div" && element.hasAttribute("data-selectable")) {
     return true;
+  }
+
+  try {
+    if (window.jQuery && window.jQuery._data) {
+      const events = window.jQuery._data(element, "events");
+      if (events && "click" in events) {
+        return true;
+      }
+    }
+  } catch (e) {
+    _jsConsoleError("Error getting jQuery click events:", e);
   }
 
   return false;
@@ -1407,20 +1456,18 @@ async function buildElementTree(
 ) {
   // Generate hover styles map at the start
   if (hoverStylesMap === undefined) {
-    hoverStylesMap = getHoverStylesMap();
+    hoverStylesMap = await getHoverStylesMap();
   }
 
   var elements = [];
   var resultArray = [];
 
-  function getChildElements(element) {
-    if (element.childElementCount !== 0) {
-      return Array.from(element.children);
-    } else {
-      return [];
-    }
-  }
-  async function processElement(element, parentId) {
+  async function processElement(
+    element,
+    parentId,
+    parent_xpath,
+    current_node_index,
+  ) {
     if (element === null) {
       _jsConsoleLog("get a null element");
       return;
@@ -1437,18 +1484,24 @@ async function buildElementTree(
       return;
     }
 
-    // if element is an "a" tag and has a target="_blank" attribute, remove the target attribute
-    // We're doing this so that skyvern can do all the navigation in a single page/tab and not open new tab
-    if (tagName === "a") {
-      if (element.getAttribute("target") === "_blank") {
-        element.removeAttribute("target");
-      }
+    let current_xpath = null;
+    if (parent_xpath) {
+      // ignore the namespace, otherwise the xpath sometimes won't find anything, specially for SVG elements
+      current_xpath =
+        parent_xpath +
+        "/" +
+        '*[name()="' +
+        tagName +
+        '"]' +
+        "[" +
+        current_node_index +
+        "]";
     }
 
-    let children = [];
+    let shadowDOMchildren = [];
     // sometimes the shadowRoot is not visible, but the elemnets in the shadowRoot are visible
     if (element.shadowRoot) {
-      children = getChildElements(element.shadowRoot);
+      shadowDOMchildren = getChildElements(element.shadowRoot);
     }
     const isVisible = isElementVisible(element);
     if (isVisible && !isHidden(element) && !isScriptOrStyle(element)) {
@@ -1479,6 +1532,8 @@ async function buildElementTree(
       ) {
         // if elemnet is the children of the <svg> with an unique_id
         elementObj = await buildElementObject(frame, element, interactable);
+      } else if (tagName === "div" && isDOMNodeRepresentDiv(element)) {
+        elementObj = await buildElementObject(frame, element, interactable);
       } else if (
         getElementText(element).length > 0 &&
         getElementText(element).length <= 5000
@@ -1499,6 +1554,7 @@ async function buildElementTree(
       }
 
       if (elementObj) {
+        elementObj.xpath = current_xpath;
         elements.push(elementObj);
         // If the element is interactable but has no interactable parent,
         // then it starts a new tree, so add it to the result array
@@ -1519,10 +1575,35 @@ async function buildElementTree(
       }
     }
 
-    children = children.concat(getChildElements(element));
+    const children = getChildElements(element);
+    const xpathMap = new Map();
+
     for (let i = 0; i < children.length; i++) {
       const childElement = children[i];
-      await processElement(childElement, parentId);
+      const tagName = childElement?.tagName?.toLowerCase();
+      if (!tagName) {
+        _jsConsoleLog("get a null tagName");
+        continue;
+      }
+      let current_node_index = xpathMap.get(tagName);
+      if (current_node_index == undefined) {
+        current_node_index = 1;
+      } else {
+        current_node_index = current_node_index + 1;
+      }
+      xpathMap.set(tagName, current_node_index);
+      await processElement(
+        childElement,
+        parentId,
+        current_xpath,
+        current_node_index,
+      );
+    }
+
+    // FIXME: xpath won't work when the element is in shadow DOM
+    for (let i = 0; i < shadowDOMchildren.length; i++) {
+      const childElement = shadowDOMchildren[i];
+      await processElement(childElement, parentId, null, 0);
     }
     return;
   }
@@ -1731,8 +1812,13 @@ async function buildElementTree(
     return trimmedResults;
   };
 
+  let current_xpath = null;
+  if (starter === document.body) {
+    current_xpath = "/html[1]";
+  }
+
   // setup before parsing the dom
-  await processElement(starter, null);
+  await processElement(starter, null, current_xpath, 1);
 
   for (var element of elements) {
     if (
@@ -2029,13 +2115,14 @@ async function scrollToNextPage(
   draw_boxes,
   frame = "main.frame",
   frame_index = undefined,
+  need_overlap = true,
 ) {
   // remove bounding boxes, scroll to next page with 200px overlap, then draw bounding boxes again
   // return true if there is a next page, false otherwise
   removeBoundingBoxes();
   window.scrollBy({
     left: 0,
-    top: window.innerHeight - 200,
+    top: need_overlap ? window.innerHeight - 200 : window.innerHeight,
     behavior: "instant",
   });
   if (draw_boxes) {
@@ -2101,72 +2188,114 @@ function scrollToElementTop(element) {
  * https://stackoverflow.com/questions/7013559/is-there-a-way-to-get-element-hover-style-while-the-element-not-in-hover-state
  * https://stackoverflow.com/questions/17226676/how-to-simulate-a-mouseover-in-pure-javascript-that-activates-the-css-hover
  */
-function getHoverStylesMap() {
+async function getHoverStylesMap() {
   const hoverMap = new Map();
-  const sheets = document.styleSheets;
+  const sheets = [...document.styleSheets];
+
+  const parseCssSheet = (sheet) => {
+    const rules = sheet.cssRules || sheet.rules;
+    for (const rule of rules) {
+      if (rule.type === 1 && rule.selectorText) {
+        // Split multiple selectors (e.g., "a:hover, button:hover")
+        const selectors = rule.selectorText.split(",").map((s) => s.trim());
+
+        for (const selector of selectors) {
+          // Check if this is a hover rule
+          if (selector.includes(":hover")) {
+            // Get all parts of the selector
+            const parts = selector.split(/\s*[>+~]\s*/);
+
+            // Get the main hoverable element (the one with :hover)
+            const hoverPart = parts.find((part) => part.includes(":hover"));
+            if (!hoverPart) continue;
+
+            // Get base selector without :hover
+            const baseSelector = hoverPart.replace(/:hover/g, "").trim();
+
+            // Skip invalid selectors
+            if (!isValidCSSSelector(baseSelector)) {
+              continue;
+            }
+
+            // Get or create styles object for this selector
+            let styles = hoverMap.get(baseSelector) || {};
+
+            // Add all style properties
+            for (const prop of rule.style) {
+              styles[prop] = rule.style[prop];
+            }
+
+            // If this is a nested selector (like :hover > .something)
+            // store it in a special format
+            if (parts.length > 1) {
+              const fullSelector = selector;
+              styles["__nested__"] = styles["__nested__"] || [];
+              styles["__nested__"].push({
+                selector: fullSelector,
+                styles: Object.fromEntries(
+                  [...rule.style].map((prop) => [prop, rule.style[prop]]),
+                ),
+              });
+            }
+
+            // only need the style which includes the cursor attribute.
+            if (!("cursor" in styles)) {
+              continue;
+            }
+            hoverMap.set(baseSelector, styles);
+          }
+        }
+      }
+    }
+  };
 
   try {
-    for (const sheet of sheets) {
-      try {
-        const rules = sheet.cssRules || sheet.rules;
-        for (const rule of rules) {
-          if (rule.type === 1 && rule.selectorText) {
-            // Split multiple selectors (e.g., "a:hover, button:hover")
-            const selectors = rule.selectorText.split(",").map((s) => s.trim());
+    await Promise.all(
+      sheets.map(async (sheet) => {
+        try {
+          parseCssSheet(sheet);
+        } catch (e) {
+          _jsConsoleWarn("Could not access stylesheet:", e);
 
-            for (const selector of selectors) {
-              // Check if this is a hover rule
-              if (selector.includes(":hover")) {
-                // Get all parts of the selector
-                const parts = selector.split(/\s*[>+~]\s*/);
+          if ((e.name !== "SecurityError" && e.code !== 18) || !sheet.href) {
+            return;
+          }
 
-                // Get the main hoverable element (the one with :hover)
-                const hoverPart = parts.find((part) => part.includes(":hover"));
-                if (!hoverPart) continue;
+          let newLink = null;
+          try {
+            _jsConsoleLog("recreating the link element: ", sheet.href);
+            const oldLink = document.querySelector(
+              `link[href="${sheet.href}"]`,
+            );
+            newLink = document.createElement("link");
+            newLink.rel = "stylesheet";
+            newLink.href = oldLink.href + "?v=" + Date.now(); // to void cache
+            newLink.crossOrigin = "anonymous";
+            // until the new link loaded, removing the old one
+            document.head.append(newLink);
 
-                // Get base selector without :hover
-                const baseSelector = hoverPart.replace(/:hover/g, "").trim();
-
-                // Skip invalid selectors
-                if (!isValidCSSSelector(baseSelector)) {
-                  continue;
-                }
-
-                // Get or create styles object for this selector
-                let styles = hoverMap.get(baseSelector) || {};
-
-                // Add all style properties
-                for (const prop of rule.style) {
-                  styles[prop] = rule.style[prop];
-                }
-
-                // If this is a nested selector (like :hover > .something)
-                // store it in a special format
-                if (parts.length > 1) {
-                  const fullSelector = selector;
-                  styles["__nested__"] = styles["__nested__"] || [];
-                  styles["__nested__"].push({
-                    selector: fullSelector,
-                    styles: Object.fromEntries(
-                      [...rule.style].map((prop) => [prop, rule.style[prop]]),
-                    ),
-                  });
-                }
-
-                // only need the style which includes the cursor attribute.
-                if (!("cursor" in styles)) {
-                  continue;
-                }
-                hoverMap.set(baseSelector, styles);
-              }
+            // wait for a while until the sheet is fully loaded
+            await asyncSleepFor(1500);
+            const newSheets = [...document.styleSheets];
+            const refreshedSheet = newSheets.find(
+              (s) => s.href === newLink.href,
+            );
+            if (!refreshedSheet) {
+              newLink.remove();
+              return;
+            }
+            _jsConsoleLog("parsing recreated the link element: ", newLink.href);
+            parseCssSheet(refreshedSheet);
+            oldLink.remove();
+          } catch (e) {
+            _jsConsoleWarn("Error recreating the link element:", e);
+            if (newLink) {
+              newLink.remove();
             }
           }
         }
-      } catch (e) {
-        _jsConsoleWarn("Could not access stylesheet:", e);
-        continue;
-      }
-    }
+      }),
+    );
   } catch (e) {
     _jsConsoleError("Error processing stylesheets:", e);
   }
@@ -2296,6 +2425,9 @@ if (window.globalObserverForDOMIncrement === undefined) {
       if (node.nodeType === Node.TEXT_NODE) continue;
       const tagName = node.tagName?.toLowerCase();
 
+      // ignore unique_id change to avoid infinite loop about DOM changes
+      if (mutation.attributeName === "unique_id") continue;
+
       // if the changing element is dropdown related elements, we should consider
       // they're the new element as long as the element is still visible on the page
       if (
@@ -2364,6 +2496,7 @@ if (window.globalObserverForDOMIncrement === undefined) {
               break;
             }
           }
+          break;
         }
         case "childList": {
           let changedNode = {
@@ -2402,11 +2535,11 @@ if (window.globalObserverForDOMIncrement === undefined) {
   });
 }
 
-function startGlobalIncrementalObserver(element = null) {
+async function startGlobalIncrementalObserver(element = null) {
   window.globalListnerFlag = true;
   window.globalDomDepthMap = new Map();
   window.globalOneTimeIncrementElements = [];
-  window.globalHoverStylesMap = getHoverStylesMap();
+  window.globalHoverStylesMap = await getHoverStylesMap();
   window.globalParsedElementCounter = new SafeCounter();
   window.globalObserverForDOMIncrement.takeRecords(); // cleanup the older data
   window.globalObserverForDOMIncrement.observe(document.body, {

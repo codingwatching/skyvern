@@ -1,4 +1,5 @@
-import { ProxyLocation } from "@/api/types";
+import { JsonObjectExtendable } from "@/types";
+import { ProxyLocation, RunEngine } from "@/api/types";
 
 export type WorkflowParameterBase = {
   parameter_type: WorkflowParameterType;
@@ -55,6 +56,17 @@ export type BitwardenCreditCardDataParameter = WorkflowParameterBase & {
   bitwarden_master_password_aws_secret_key: string;
   bitwarden_collection_id: string;
   bitwarden_item_id: string;
+  created_at: string;
+  modified_at: string;
+  deleted_at: string | null;
+};
+
+export type OnePasswordCredentialParameter = WorkflowParameterBase & {
+  parameter_type: "onepassword";
+  workflow_id: string;
+  onepassword_credential_parameter_id: string;
+  vault_id: string;
+  item_id: string;
   created_at: string;
   modified_at: string;
   deleted_at: string | null;
@@ -117,6 +129,7 @@ export const WorkflowParameterTypes = {
   Bitwarden_Login_Credential: "bitwarden_login_credential",
   Bitwarden_Sensitive_Information: "bitwarden_sensitive_information",
   Bitwarden_Credit_Card_Data: "bitwarden_credit_card_data",
+  OnePassword: "onepassword",
   Credential: "credential",
 } as const;
 
@@ -131,6 +144,7 @@ export function isDisplayedInWorkflowEditor(
   | BitwardenCreditCardDataParameter
   | BitwardenLoginCredentialParameter
   | BitwardenSensitiveInformationParameter
+  | OnePasswordCredentialParameter
   | CredentialParameter {
   return (
     parameter.parameter_type === WorkflowParameterTypes.Workflow ||
@@ -141,6 +155,7 @@ export function isDisplayedInWorkflowEditor(
       WorkflowParameterTypes.Bitwarden_Sensitive_Information ||
     parameter.parameter_type ===
       WorkflowParameterTypes.Bitwarden_Credit_Card_Data ||
+    parameter.parameter_type === WorkflowParameterTypes.OnePassword ||
     parameter.parameter_type === WorkflowParameterTypes.Credential
   );
 }
@@ -152,6 +167,7 @@ export type Parameter =
   | BitwardenLoginCredentialParameter
   | BitwardenSensitiveInformationParameter
   | BitwardenCreditCardDataParameter
+  | OnePasswordCredentialParameter
   | AWSSecretParameter
   | CredentialParameter;
 
@@ -221,6 +237,7 @@ export const WorkflowEditorParameterTypes = {
   Secret: "secret",
   Context: "context",
   CreditCardData: "creditCardData",
+  OnePassword: "onepassword",
 } as const;
 
 export type WorkflowEditorParameterType =
@@ -231,6 +248,7 @@ export type WorkflowBlockBase = {
   block_type: WorkflowBlockType;
   output_parameter: OutputParameter;
   continue_on_failure: boolean;
+  model: WorkflowModel | null;
 };
 
 export type TaskBlock = WorkflowBlockBase & {
@@ -251,6 +269,8 @@ export type TaskBlock = WorkflowBlockBase & {
   totp_verification_url?: string | null;
   totp_identifier?: string | null;
   cache_actions: boolean;
+  include_action_history_in_verification: boolean;
+  engine: RunEngine | null;
 };
 
 export type Taskv2Block = WorkflowBlockBase & {
@@ -345,6 +365,7 @@ export type ActionBlock = WorkflowBlockBase & {
   totp_verification_url?: string | null;
   totp_identifier?: string | null;
   cache_actions: boolean;
+  engine: RunEngine | null;
 };
 
 export type NavigationBlock = WorkflowBlockBase & {
@@ -363,6 +384,8 @@ export type NavigationBlock = WorkflowBlockBase & {
   cache_actions: boolean;
   complete_criterion: string | null;
   terminate_criterion: string | null;
+  engine: RunEngine | null;
+  include_action_history_in_verification: boolean;
 };
 
 export type ExtractionBlock = WorkflowBlockBase & {
@@ -375,6 +398,7 @@ export type ExtractionBlock = WorkflowBlockBase & {
   max_steps_per_run?: number | null;
   parameters: Array<WorkflowParameter>;
   cache_actions: boolean;
+  engine: RunEngine | null;
 };
 
 export type LoginBlock = WorkflowBlockBase & {
@@ -391,6 +415,7 @@ export type LoginBlock = WorkflowBlockBase & {
   cache_actions: boolean;
   complete_criterion: string | null;
   terminate_criterion: string | null;
+  engine: RunEngine | null;
 };
 
 export type WaitBlock = WorkflowBlockBase & {
@@ -411,6 +436,7 @@ export type FileDownloadBlock = WorkflowBlockBase & {
   totp_verification_url?: string | null;
   totp_identifier?: string | null;
   cache_actions: boolean;
+  engine: RunEngine | null;
 };
 
 export type PDFParserBlock = WorkflowBlockBase & {
@@ -441,8 +467,10 @@ export type WorkflowApiResponse = {
   proxy_location: ProxyLocation | null;
   webhook_callback_url: string | null;
   persist_browser_session: boolean;
+  model: WorkflowModel | null;
   totp_verification_url: string | null;
   totp_identifier: string | null;
+  max_screenshot_scrolling_times: number | null;
   created_at: string;
   modified_at: string;
   deleted_at: string | null;
@@ -452,7 +480,11 @@ export type WorkflowSettings = {
   proxyLocation: ProxyLocation | null;
   webhookCallbackUrl: string | null;
   persistBrowserSession: boolean;
+  model: WorkflowModel | null;
+  maxScreenshotScrollingTimes: number | null;
 };
+
+export type WorkflowModel = JsonObjectExtendable<{ model_name: string }>;
 
 export function isOutputParameter(
   parameter: Parameter,

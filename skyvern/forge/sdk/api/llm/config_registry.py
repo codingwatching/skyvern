@@ -50,6 +50,10 @@ class LLMConfigRegistry:
 
         return cls._configs[llm_key]
 
+    @classmethod
+    def get_model_names(cls) -> list[str]:
+        return list(cls._configs.keys())
+
 
 if settings.ENABLE_OPENAI:
     LLMConfigRegistry.register_config(
@@ -236,6 +240,36 @@ if settings.ENABLE_ANTHROPIC:
             max_completion_tokens=8192,
         ),
     )
+    LLMConfigRegistry.register_config(
+        "ANTHROPIC_CLAUDE3.5_HAIKU",
+        LLMConfig(
+            "anthropic/claude-3-5-haiku-latest",
+            ["ANTHROPIC_API_KEY"],
+            supports_vision=True,
+            add_assistant_prefix=True,
+            max_completion_tokens=8192,
+        ),
+    )
+    LLMConfigRegistry.register_config(
+        "ANTHROPIC_CLAUDE4_OPUS",
+        LLMConfig(
+            "anthropic/claude-opus-4-20250514",
+            ["ANTHROPIC_API_KEY"],
+            supports_vision=True,
+            add_assistant_prefix=True,
+            max_completion_tokens=8192,
+        ),
+    )
+    LLMConfigRegistry.register_config(
+        "ANTHROPIC_CLAUDE4_SONNET",
+        LLMConfig(
+            "anthropic/claude-sonnet-4-20250514",
+            ["ANTHROPIC_API_KEY"],
+            supports_vision=True,
+            add_assistant_prefix=True,
+            max_completion_tokens=8192,
+        ),
+    )
 
 if settings.ENABLE_BEDROCK:
     # Supported through AWS IAM authentication
@@ -267,12 +301,23 @@ if settings.ENABLE_BEDROCK:
         ),
     )
     LLMConfigRegistry.register_config(
+        "BEDROCK_ANTHROPIC_CLAUDE3.5_HAIKU",
+        LLMConfig(
+            "bedrock/anthropic.claude-3-5-haiku-20241022-v1:0",
+            ["AWS_REGION"],
+            supports_vision=True,
+            add_assistant_prefix=True,
+            max_completion_tokens=8192,
+        ),
+    )
+    LLMConfigRegistry.register_config(
         "BEDROCK_ANTHROPIC_CLAUDE3.5_SONNET",
         LLMConfig(
             "bedrock/anthropic.claude-3-5-sonnet-20241022-v2:0",
             ["AWS_REGION"],
             supports_vision=True,
             add_assistant_prefix=True,
+            max_completion_tokens=8192,
         ),
     )
     LLMConfigRegistry.register_config(
@@ -282,6 +327,7 @@ if settings.ENABLE_BEDROCK:
             ["AWS_REGION"],
             supports_vision=True,
             add_assistant_prefix=True,
+            max_completion_tokens=8192,
         ),
     )
     LLMConfigRegistry.register_config(
@@ -319,6 +365,26 @@ if settings.ENABLE_BEDROCK:
             supports_vision=True,
             add_assistant_prefix=True,
             max_completion_tokens=64000,
+        ),
+    )
+    LLMConfigRegistry.register_config(
+        "BEDROCK_ANTHROPIC_CLAUDE4_SONNET_INFERENCE_PROFILE",
+        LLMConfig(
+            "bedrock/us.anthropic.claude-sonnet-4-20250514-v1:0",
+            ["AWS_REGION"],
+            supports_vision=True,
+            add_assistant_prefix=True,
+            max_completion_tokens=64000,
+        ),
+    )
+    LLMConfigRegistry.register_config(
+        "BEDROCK_ANTHROPIC_CLAUDE4_OPUS_INFERENCE_PROFILE",
+        LLMConfig(
+            "bedrock/us.anthropic.claude-opus-4-20250514-v1:0",
+            ["AWS_REGION"],
+            supports_vision=True,
+            add_assistant_prefix=True,
+            max_completion_tokens=32000,
         ),
     )
 
@@ -502,6 +568,48 @@ if settings.ENABLE_AZURE_O3:
             max_completion_tokens=100000,
         ),
     )
+if settings.ENABLE_VOLCENGINE:
+    LLMConfigRegistry.register_config(
+        "VOLCENGINE_DOUBAO_SEED_1_6",
+        LLMConfig(
+            "volcengine/doubao-seed-1.6-250615",
+            ["VOLCENGINE_API_KEY"],
+            litellm_params=LiteLLMParams(
+                api_base=settings.VOLCENGINE_API_BASE,
+                api_key=settings.VOLCENGINE_API_KEY,
+            ),
+            supports_vision=True,
+            add_assistant_prefix=False,
+        ),
+    )
+
+    LLMConfigRegistry.register_config(
+        "VOLCENGINE_DOUBAO_SEED_1_6_FLASH",
+        LLMConfig(
+            "volcengine/doubao-seed-1.6-flash-250615",
+            ["VOLCENGINE_API_KEY"],
+            litellm_params=LiteLLMParams(
+                api_base=settings.VOLCENGINE_API_BASE,
+                api_key=settings.VOLCENGINE_API_KEY,
+            ),
+            supports_vision=True,
+            add_assistant_prefix=False,
+        ),
+    )
+
+    LLMConfigRegistry.register_config(
+        "VOLCENGINE_DOUBAO_1_5_THINKING_VISION_PRO",
+        LLMConfig(
+            "volcengine/doubao-1-5-thinking-vision-pro-250428",
+            ["VOLCENGINE_API_KEY"],
+            litellm_params=LiteLLMParams(
+                api_base=settings.VOLCENGINE_API_BASE,
+                api_key=settings.VOLCENGINE_API_KEY,
+            ),
+            supports_vision=True,
+            add_assistant_prefix=False,
+        ),
+    )
 
 if settings.ENABLE_GEMINI:
     LLMConfigRegistry.register_config(
@@ -545,9 +653,9 @@ if settings.ENABLE_GEMINI:
         ),
     )
     LLMConfigRegistry.register_config(
-        "GEMINI_2.5_PRO_PREVIEW_03_25",
+        "GEMINI_2.5_PRO_PREVIEW",
         LLMConfig(
-            "gemini/gemini-2.5-pro-preview-03-25",
+            "gemini/gemini-2.5-pro-preview-05-06",
             ["GEMINI_API_KEY"],
             supports_vision=True,
             add_assistant_prefix=False,
@@ -558,6 +666,16 @@ if settings.ENABLE_GEMINI:
         "GEMINI_2.5_PRO_EXP_03_25",
         LLMConfig(
             "gemini/gemini-2.5-pro-exp-03-25",
+            ["GEMINI_API_KEY"],
+            supports_vision=True,
+            add_assistant_prefix=False,
+            max_completion_tokens=65536,
+        ),
+    )
+    LLMConfigRegistry.register_config(
+        "GEMINI_2.5_FLASH_PREVIEW",
+        LLMConfig(
+            "gemini/gemini-2.5-flash-preview-05-20",
             ["GEMINI_API_KEY"],
             supports_vision=True,
             add_assistant_prefix=False,
@@ -737,7 +855,49 @@ if settings.ENABLE_NOVITA:
 # Get the credentials json file. See documentation: https://support.google.com/a/answer/7378726?hl=en
 # my_vertex_credentials = json.dumps(json.load(open("my_credentials_file.json")))
 # Set the value of my_vertex_credentials as the environment variable VERTEX_CREDENTIALS
-if settings.ENABLE_VERTEX_AI:
+# NOTE: If you want to specify a location, make sure the model is availale in the target location.
+# See documentation: https://cloud.google.com/vertex-ai/generative-ai/docs/learn/locations#united-states
+if settings.ENABLE_VERTEX_AI and settings.VERTEX_CREDENTIALS:
+    if not settings.VERTEX_PROJECT_ID:
+        import json
+
+        credentials = json.loads(settings.VERTEX_CREDENTIALS)
+        settings.VERTEX_PROJECT_ID = credentials.get("project_id")
+
+    api_base: str | None = None
+    if settings.VERTEX_LOCATION == "global":
+        api_base = f"https://aiplatform.googleapis.com/v1/projects/{settings.VERTEX_PROJECT_ID}/locations/global/publishers/google/models"
+
+    LLMConfigRegistry.register_config(
+        "VERTEX_GEMINI_2.5_PRO_PREVIEW",
+        LLMConfig(
+            "vertex_ai/gemini-2.5-pro-preview-05-06",
+            ["VERTEX_CREDENTIALS"],
+            supports_vision=True,
+            add_assistant_prefix=False,
+            max_completion_tokens=65535,
+            litellm_params=LiteLLMParams(
+                vertex_credentials=settings.VERTEX_CREDENTIALS,
+                api_base=f"{api_base}/gemini-2.5-pro-preview-05-06" if api_base else None,
+                vertex_location=settings.VERTEX_LOCATION,
+            ),
+        ),
+    )
+    LLMConfigRegistry.register_config(
+        "VERTEX_GEMINI_2.5_FLASH_PREVIEW",
+        LLMConfig(
+            "vertex_ai/gemini-2.5-flash-preview-05-20",
+            ["VERTEX_CREDENTIALS"],
+            supports_vision=True,
+            add_assistant_prefix=False,
+            max_completion_tokens=65535,
+            litellm_params=LiteLLMParams(
+                vertex_credentials=settings.VERTEX_CREDENTIALS,
+                api_base=f"{api_base}/gemini-2.5-flash-preview-05-20" if api_base else None,
+                vertex_location=settings.VERTEX_LOCATION,
+            ),
+        ),
+    )
     LLMConfigRegistry.register_config(
         "VERTEX_GEMINI_2.5_FLASH_PREVIEW_04_17",
         LLMConfig(
@@ -748,19 +908,23 @@ if settings.ENABLE_VERTEX_AI:
             max_completion_tokens=65535,
             litellm_params=LiteLLMParams(
                 vertex_credentials=settings.VERTEX_CREDENTIALS,
+                api_base=f"{api_base}/gemini-2.5-flash-preview-04-17" if api_base else None,
+                vertex_location=settings.VERTEX_LOCATION,
             ),
         ),
     )
     LLMConfigRegistry.register_config(
-        "VERTEX_GEMINI_2.5_PRO_PREVIEW_03_25",
+        "VERTEX_GEMINI_2.5_FLASH_PREVIEW_05_20",
         LLMConfig(
-            "vertex_ai/gemini-2.5-pro-preview-03-25",
+            "vertex_ai/gemini-2.5-flash-preview-05-20",
             ["VERTEX_CREDENTIALS"],
             supports_vision=True,
             add_assistant_prefix=False,
             max_completion_tokens=65535,
             litellm_params=LiteLLMParams(
                 vertex_credentials=settings.VERTEX_CREDENTIALS,
+                api_base=f"{api_base}/gemini-2.5-flash-preview-05-20" if api_base else None,
+                vertex_location=settings.VERTEX_LOCATION,
             ),
         ),
     )
@@ -773,7 +937,9 @@ if settings.ENABLE_VERTEX_AI:
             add_assistant_prefix=False,
             max_completion_tokens=8192,
             litellm_params=LiteLLMParams(
-                vertex_credentials=settings.VERTEX_CREDENTIALS,  # type: ignore
+                api_base=f"{api_base}/gemini-2.0-flash-001" if api_base else None,
+                vertex_credentials=settings.VERTEX_CREDENTIALS,
+                vertex_location=settings.VERTEX_LOCATION,
             ),
         ),
     )
@@ -786,7 +952,8 @@ if settings.ENABLE_VERTEX_AI:
             add_assistant_prefix=False,
             max_completion_tokens=8192,
             litellm_params=LiteLLMParams(
-                vertex_credentials=settings.VERTEX_CREDENTIALS,  # type: ignore
+                vertex_credentials=settings.VERTEX_CREDENTIALS,
+                vertex_location=settings.VERTEX_LOCATION,  # WARN: this model don't support global
             ),
         ),
     )
@@ -799,7 +966,8 @@ if settings.ENABLE_VERTEX_AI:
             add_assistant_prefix=False,
             max_completion_tokens=8192,
             litellm_params=LiteLLMParams(
-                vertex_credentials=settings.VERTEX_CREDENTIALS,  # type: ignore
+                vertex_credentials=settings.VERTEX_CREDENTIALS,
+                vertex_location=settings.VERTEX_LOCATION,  # WARN: this model don't support global
             ),
         ),
     )
