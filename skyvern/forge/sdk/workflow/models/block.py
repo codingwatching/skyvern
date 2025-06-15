@@ -20,7 +20,7 @@ from urllib.parse import quote
 import filetype
 import structlog
 from email_validator import EmailNotValidError, validate_email
-from jinja2 import Template
+from jinja2.sandbox import SandboxedEnvironment
 from playwright.async_api import Page
 from pydantic import BaseModel, Field
 from pypdf import PdfReader
@@ -77,6 +77,7 @@ from skyvern.webeye.browser_factory import BrowserState
 from skyvern.webeye.utils.page import SkyvernFrame
 
 LOG = structlog.get_logger()
+jinja_sandbox_env = SandboxedEnvironment()
 
 
 class BlockType(StrEnum):
@@ -126,6 +127,7 @@ class Block(BaseModel, abc.ABC):
     block_type: BlockType
     output_parameter: OutputParameter
     continue_on_failure: bool = False
+    model: dict[str, Any] | None = None
 
     async def record_output_parameter_value(
         self,
@@ -183,7 +185,7 @@ class Block(BaseModel, abc.ABC):
     ) -> str:
         if not potential_template:
             return potential_template
-        template = Template(potential_template)
+        template = jinja_sandbox_env.from_string(potential_template)
 
         block_reference_data: dict[str, Any] = workflow_run_context.get_block_metadata(self.label)
         template_data = workflow_run_context.values.copy()
@@ -197,10 +199,19 @@ class Block(BaseModel, abc.ABC):
                 )
 
         template_data[self.label] = block_reference_data
+
+        # inject the forloop metadata as global variables
+        if "current_index" in block_reference_data:
+            template_data["current_index"] = block_reference_data["current_index"]
+        if "current_item" in block_reference_data:
+            template_data["current_item"] = block_reference_data["current_item"]
+        if "current_value" in block_reference_data:
+            template_data["current_value"] = block_reference_data["current_value"]
+
         return template.render(template_data)
 
     @classmethod
-    def get_subclasses(cls) -> tuple[type["Block"], ...]:
+    def get_subclasses(cls) -> tuple[type[Block], ...]:
         return tuple(cls.__subclasses__())
 
     @staticmethod
@@ -296,7 +307,13 @@ class Block(BaseModel, abc.ABC):
             if not browser_state:
                 LOG.warning("No browser state found when creating workflow_run_block", workflow_run_id=workflow_run_id)
             else:
-                screenshot = await browser_state.take_screenshot(full_page=True)
+                screenshot = await browser_state.take_fullpage_screenshot(
+                    use_playwright_fullpage=app.EXPERIMENTATION_PROVIDER.is_feature_enabled_cached(
+                        "ENABLE_PLAYWRIGHT_FULLPAGE",
+                        workflow_run_id,
+                        properties={"organization_id": str(organization_id)},
+                    )
+                )
                 if screenshot:
                     await app.ARTIFACT_MANAGER.create_workflow_run_block_artifact(
                         workflow_run_block=workflow_run_block,
@@ -367,6 +384,7 @@ class BaseTaskBlock(Block):
     totp_identifier: str | None = None
     cache_actions: bool = False
     complete_verification: bool = True
+    include_action_history_in_verification: bool = False
 
     def get_all_parameters(
         self,
@@ -557,8 +575,16 @@ class BaseTaskBlock(Block):
                     browser_state = await app.BROWSER_MANAGER.get_or_create_for_workflow_run(
                         workflow_run=workflow_run, url=self.url, browser_session_id=browser_session_id
                     )
+                    # assert that the browser state is not None, otherwise we can't go through typing
+                    assert browser_state is not None
                     # add screenshot artifact for the first task
-                    screenshot = await browser_state.take_screenshot(full_page=True)
+                    screenshot = await browser_state.take_fullpage_screenshot(
+                        use_playwright_fullpage=app.EXPERIMENTATION_PROVIDER.is_feature_enabled_cached(
+                            "ENABLE_PLAYWRIGHT_FULLPAGE",
+                            workflow_run_id,
+                            properties={"organization_id": str(organization_id)},
+                        )
+                    )
                     if screenshot:
                         await app.ARTIFACT_MANAGER.create_workflow_run_block_artifact(
                             workflow_run_block=workflow_run_block,
@@ -927,6 +953,7 @@ class ForLoopBlock(Block):
         workflow_run_context: WorkflowRunContext,
         loop_over_values: list[Any],
         organization_id: str | None = None,
+        browser_session_id: str | None = None,
     ) -> LoopBlockExecutedResult:
         outputs_with_loop_values: list[list[dict[str, Any]]] = []
         block_outputs: list[BlockResult] = []
@@ -942,7 +969,9 @@ class ForLoopBlock(Block):
                 metadata: BlockMetadata = {
                     "current_index": loop_idx,
                     "current_value": loop_over_value,
+                    "current_item": loop_over_value,
                 }
+                workflow_run_context.update_block_metadata(self.label, metadata)
                 workflow_run_context.update_block_metadata(loop_block.label, metadata)
 
                 original_loop_block = loop_block
@@ -953,6 +982,7 @@ class ForLoopBlock(Block):
                     workflow_run_id=workflow_run_id,
                     parent_workflow_run_block_id=workflow_run_block_id,
                     organization_id=organization_id,
+                    browser_session_id=browser_session_id,
                 )
 
                 output_value = (
@@ -1105,6 +1135,7 @@ class ForLoopBlock(Block):
             workflow_run_context=workflow_run_context,
             loop_over_values=loop_over_values,
             organization_id=organization_id,
+            browser_session_id=browser_session_id,
         )
         await self.record_output_parameter_value(
             workflow_run_context, workflow_run_id, loop_executed_result.outputs_with_loop_values
@@ -1211,12 +1242,7 @@ async def wrapper():
             )
             browser_state = await app.PERSISTENT_SESSIONS_MANAGER.get_browser_state(browser_session_id)
             if browser_state:
-                await app.PERSISTENT_SESSIONS_MANAGER.occupy_browser_session(
-                    browser_session_id,
-                    runnable_type="workflow_run",
-                    runnable_id=workflow_run_id,
-                    organization_id=organization_id,
-                )
+                LOG.info("Was occupying session here, but no longer.", browser_session_id=browser_session_id)
         else:
             browser_state = app.BROWSER_MANAGER.get_for_workflow_run(workflow_run_id)
 
@@ -2109,7 +2135,7 @@ class FileParserBlock(Block):
     def validate_file_type(self, file_url_used: str, file_path: str) -> None:
         if self.file_type == FileType.CSV:
             try:
-                with open(file_path, "r") as file:
+                with open(file_path) as file:
                     csv.Sniffer().sniff(file.read(1024))
             except csv.Error as e:
                 raise InvalidFileType(file_url=file_url_used, file_type=self.file_type, error=str(e))
@@ -2158,7 +2184,7 @@ class FileParserBlock(Block):
         self.validate_file_type(self.file_url, file_path)
         # Parse the file into a list of dictionaries where each dictionary represents a row in the file
         parsed_data = []
-        with open(file_path, "r") as file:
+        with open(file_path) as file:
             if self.file_type == FileType.CSV:
                 reader = csv.DictReader(file)
                 for row in reader:
@@ -2474,6 +2500,7 @@ class TaskV2Block(Block):
                 proxy_location=workflow_run.proxy_location,
                 totp_identifier=self.totp_identifier,
                 totp_verification_url=self.totp_verification_url,
+                max_screenshot_scrolling_times=workflow_run.max_screenshot_scrolling_times,
             )
             await app.DATABASE.update_task_v2(
                 task_v2.observer_cruise_id, status=TaskV2Status.queued, organization_id=organization_id
@@ -2505,6 +2532,7 @@ class TaskV2Block(Block):
                     workflow_permanent_id=workflow_run.workflow_permanent_id,
                     workflow_run_id=workflow_run_id,
                     browser_session_id=browser_session_id,
+                    max_screenshot_scrolling_times=workflow_run.max_screenshot_scrolling_times,
                 )
             )
         result_dict = None

@@ -29,6 +29,7 @@ from skyvern.forge.sdk.db.id import (
     generate_bitwarden_sensitive_information_parameter_id,
     generate_credential_id,
     generate_credential_parameter_id,
+    generate_onepassword_credential_parameter_id,
     generate_org_id,
     generate_organization_auth_token_id,
     generate_organization_bitwarden_collection_id,
@@ -83,6 +84,11 @@ class TaskModel(Base):
     errors = Column(JSON, default=[], nullable=False)
     max_steps_per_run = Column(Integer, nullable=True)
     application = Column(String, nullable=True)
+    include_action_history_in_verification = Column(Boolean, default=False, nullable=True)
+    queued_at = Column(DateTime, nullable=True)
+    started_at = Column(DateTime, nullable=True)
+    finished_at = Column(DateTime, nullable=True)
+    max_screenshot_scrolling_times = Column(Integer, nullable=True)
     created_at = Column(DateTime, default=datetime.datetime.utcnow, nullable=False, index=True)
     modified_at = Column(
         DateTime,
@@ -91,6 +97,7 @@ class TaskModel(Base):
         nullable=False,
         index=True,
     )
+    model = Column(JSON, nullable=True)
 
 
 class StepModel(Base):
@@ -212,9 +219,11 @@ class WorkflowModel(Base):
     workflow_definition = Column(JSON, nullable=False)
     proxy_location = Column(String)
     webhook_callback_url = Column(String)
+    max_screenshot_scrolling_times = Column(Integer, nullable=True)
     totp_verification_url = Column(String)
     totp_identifier = Column(String)
     persist_browser_session = Column(Boolean, default=False, nullable=False)
+    model = Column(JSON, nullable=True)
     status = Column(String, nullable=False, default="published")
 
     created_at = Column(DateTime, default=datetime.datetime.utcnow, nullable=False)
@@ -247,6 +256,11 @@ class WorkflowRunModel(Base):
     webhook_callback_url = Column(String)
     totp_verification_url = Column(String)
     totp_identifier = Column(String)
+    max_screenshot_scrolling_times = Column(Integer, nullable=True)
+
+    queued_at = Column(DateTime, nullable=True)
+    started_at = Column(DateTime, nullable=True)
+    finished_at = Column(DateTime, nullable=True)
 
     created_at = Column(DateTime, default=datetime.datetime.utcnow, nullable=False)
     modified_at = Column(
@@ -403,6 +417,28 @@ class CredentialParameterModel(Base):
 
     created_at = Column(DateTime, default=datetime.datetime.utcnow, nullable=False)
     modified_at = Column(DateTime, default=datetime.datetime.utcnow, onupdate=datetime.datetime.utcnow, nullable=False)
+    deleted_at = Column(DateTime, nullable=True)
+
+
+class OnePasswordCredentialParameterModel(Base):
+    __tablename__ = "onepassword_credential_parameters"
+
+    onepassword_credential_parameter_id = Column(
+        String, primary_key=True, index=True, default=generate_onepassword_credential_parameter_id
+    )
+    workflow_id = Column(String, index=True, nullable=False)
+    key = Column(String, nullable=False)
+    description = Column(String, nullable=True)
+    vault_id = Column(String, nullable=False)
+    item_id = Column(String, nullable=False)
+
+    created_at = Column(DateTime, default=datetime.datetime.utcnow, nullable=False)
+    modified_at = Column(
+        DateTime,
+        default=datetime.datetime.utcnow,
+        onupdate=datetime.datetime.utcnow,
+        nullable=False,
+    )
     deleted_at = Column(DateTime, nullable=True)
 
 
@@ -587,9 +623,16 @@ class TaskV2Model(Base):
     proxy_location = Column(String, nullable=True)
     extracted_information_schema = Column(JSON, nullable=True)
     error_code_mapping = Column(JSON, nullable=True)
+    max_steps = Column(Integer, nullable=True)
+    max_screenshot_scrolling_times = Column(Integer, nullable=True)
+
+    queued_at = Column(DateTime, nullable=True)
+    started_at = Column(DateTime, nullable=True)
+    finished_at = Column(DateTime, nullable=True)
 
     created_at = Column(DateTime, default=datetime.datetime.utcnow, nullable=False)
     modified_at = Column(DateTime, default=datetime.datetime.utcnow, onupdate=datetime.datetime.utcnow, nullable=False)
+    model = Column(JSON, nullable=True)
 
 
 class ThoughtModel(Base):
@@ -625,13 +668,16 @@ class PersistentBrowserSessionModel(Base):
     __tablename__ = "persistent_browser_sessions"
 
     persistent_browser_session_id = Column(String, primary_key=True, default=generate_persistent_browser_session_id)
-    organization_id = Column(String, nullable=False)
+    organization_id = Column(String, nullable=False, index=True)
     runnable_type = Column(String, nullable=True)
-    runnable_id = Column(String, nullable=True)
+    runnable_id = Column(String, nullable=True, index=True)
     browser_id = Column(String, nullable=True)
     browser_address = Column(String, nullable=True)
     status = Column(String, nullable=True, default="created")
-    created_at = Column(DateTime, default=datetime.datetime.utcnow, nullable=False)
+    timeout_minutes = Column(Integer, nullable=True)
+    started_at = Column(DateTime, nullable=True)
+    completed_at = Column(DateTime, nullable=True)
+    created_at = Column(DateTime, default=datetime.datetime.utcnow, nullable=False, index=True)
     modified_at = Column(DateTime, default=datetime.datetime.utcnow, onupdate=datetime.datetime.utcnow, nullable=False)
     deleted_at = Column(DateTime, nullable=True)
 

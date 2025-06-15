@@ -2,7 +2,7 @@ import dataclasses
 import json
 import time
 from asyncio import CancelledError
-from typing import Any
+from typing import Any, AsyncIterator
 
 import litellm
 import structlog
@@ -10,6 +10,8 @@ from anthropic import NOT_GIVEN
 from anthropic.types.beta.beta_message import BetaMessage as AnthropicMessage
 from jinja2 import Template
 from litellm.utils import CustomStreamWrapper, ModelResponse
+from openai.types.chat.chat_completion_chunk import ChatCompletionChunk
+from pydantic import BaseModel
 
 from skyvern.config import settings
 from skyvern.exceptions import SkyvernContextWindowExceededError
@@ -22,6 +24,7 @@ from skyvern.forge.sdk.api.llm.exceptions import (
     LLMProviderErrorRetryableTask,
 )
 from skyvern.forge.sdk.api.llm.models import LLMAPIHandler, LLMConfig, LLMRouterConfig, dummy_llm_api_handler
+from skyvern.forge.sdk.api.llm.ui_tars_response import UITarsResponse
 from skyvern.forge.sdk.api.llm.utils import llm_messages_builder, llm_messages_builder_with_history, parse_api_response
 from skyvern.forge.sdk.artifact.models import ArtifactType
 from skyvern.forge.sdk.core import skyvern_context
@@ -33,8 +36,30 @@ from skyvern.utils.image_resizer import Resolution, get_resize_target_dimension,
 LOG = structlog.get_logger()
 
 
+class LLMCallStats(BaseModel):
+    input_tokens: int | None = None
+    output_tokens: int | None = None
+    reasoning_tokens: int | None = None
+    cached_tokens: int | None = None
+    llm_cost: float | None = None
+
+
 class LLMAPIHandlerFactory:
     _custom_handlers: dict[str, LLMAPIHandler] = {}
+
+    @staticmethod
+    def get_override_llm_api_handler(override_llm_key: str | None, *, default: LLMAPIHandler) -> LLMAPIHandler:
+        if not override_llm_key:
+            return default
+        try:
+            return LLMAPIHandlerFactory.get_llm_api_handler(override_llm_key)
+        except Exception:
+            LOG.warning(
+                "Failed to get override LLM API handler, going to use the default.",
+                override_llm_key=override_llm_key,
+                exc_info=True,
+            )
+            return default
 
     @staticmethod
     def get_llm_api_handler_with_router(llm_key: str) -> LLMAPIHandler:
@@ -127,28 +152,39 @@ class LLMAPIHandlerFactory:
                 ai_suggestion=ai_suggestion,
             )
             try:
-                response = await router.acompletion(model=main_model_group, messages=messages, **parameters)
+                response = await router.acompletion(
+                    model=main_model_group, messages=messages, timeout=settings.LLM_CONFIG_TIMEOUT, **parameters
+                )
             except litellm.exceptions.APIError as e:
                 raise LLMProviderErrorRetryableTask(llm_key) from e
             except litellm.exceptions.ContextWindowExceededError as e:
+                duration_seconds = time.time() - start_time
                 LOG.exception(
                     "Context window exceeded",
                     llm_key=llm_key,
                     model=main_model_group,
+                    prompt_name=prompt_name,
+                    duration_seconds=duration_seconds,
                 )
                 raise SkyvernContextWindowExceededError() from e
             except ValueError as e:
+                duration_seconds = time.time() - start_time
                 LOG.exception(
                     "LLM token limit exceeded",
                     llm_key=llm_key,
                     model=main_model_group,
+                    prompt_name=prompt_name,
+                    duration_seconds=duration_seconds,
                 )
                 raise LLMProviderErrorRetryableTask(llm_key) from e
             except Exception as e:
+                duration_seconds = time.time() - start_time
                 LOG.exception(
                     "LLM request failed unexpectedly",
                     llm_key=llm_key,
                     model=main_model_group,
+                    prompt_name=prompt_name,
+                    duration_seconds=duration_seconds,
                 )
                 raise LLMProviderError(llm_key) from e
 
@@ -162,6 +198,7 @@ class LLMAPIHandlerFactory:
             )
             if step or thought:
                 try:
+                    # FIXME: volcengine doesn't support litellm cost calculation.
                     llm_cost = litellm.completion_cost(completion_response=response)
                 except Exception as e:
                     LOG.debug("Failed to calculate LLM cost", error=str(e), exc_info=True)
@@ -292,11 +329,13 @@ class LLMAPIHandlerFactory:
             if not llm_config.supports_vision:
                 screenshots = None
 
+            model_name = llm_config.model_name
+
             messages = await llm_messages_builder(prompt, screenshots, llm_config.add_assistant_prefix)
             await app.ARTIFACT_MANAGER.create_llm_artifact(
                 data=json.dumps(
                     {
-                        "model": llm_config.model_name,
+                        "model": model_name,
                         "messages": messages,
                         # we're not using active_parameters here because it may contain sensitive information
                         **parameters,
@@ -314,7 +353,7 @@ class LLMAPIHandlerFactory:
                 # TODO (kerem): add a retry mechanism to this call (acompletion_with_retries)
                 # TODO (kerem): use litellm fallbacks? https://litellm.vercel.app/docs/tutorials/fallbacks#how-does-completion_with_fallbacks-work
                 response = await litellm.acompletion(
-                    model=llm_config.model_name,
+                    model=model_name,
                     messages=messages,
                     timeout=settings.LLM_CONFIG_TIMEOUT,
                     **active_parameters,
@@ -322,10 +361,13 @@ class LLMAPIHandlerFactory:
             except litellm.exceptions.APIError as e:
                 raise LLMProviderErrorRetryableTask(llm_key) from e
             except litellm.exceptions.ContextWindowExceededError as e:
+                duration_seconds = time.time() - start_time
                 LOG.exception(
                     "Context window exceeded",
                     llm_key=llm_key,
-                    model=llm_config.model_name,
+                    model=model_name,
+                    prompt_name=prompt_name,
+                    duration_seconds=duration_seconds,
                 )
                 raise SkyvernContextWindowExceededError() from e
             except CancelledError:
@@ -333,12 +375,20 @@ class LLMAPIHandlerFactory:
                 LOG.error(
                     "LLM request got cancelled",
                     llm_key=llm_key,
-                    model=llm_config.model_name,
+                    model=model_name,
+                    prompt_name=prompt_name,
                     duration=t_llm_cancelled - t_llm_request,
                 )
                 raise LLMProviderError(llm_key)
             except Exception as e:
-                LOG.exception("LLM request failed unexpectedly", llm_key=llm_key)
+                duration_seconds = time.time() - start_time
+                LOG.exception(
+                    "LLM request failed unexpectedly",
+                    llm_key=llm_key,
+                    model=model_name,
+                    prompt_name=prompt_name,
+                    duration_seconds=duration_seconds,
+                )
                 raise LLMProviderError(llm_key) from e
 
             await app.ARTIFACT_MANAGER.create_llm_artifact(
@@ -352,6 +402,7 @@ class LLMAPIHandlerFactory:
 
             if step or thought:
                 try:
+                    # FIXME: volcengine doesn't support litellm cost calculation.
                     llm_cost = litellm.completion_cost(completion_response=response)
                 except Exception as e:
                     LOG.debug("Failed to calculate LLM cost", error=str(e), exc_info=True)
@@ -624,41 +675,27 @@ class LLMCaller:
         )
 
         if step or thought:
-            try:
-                llm_cost = litellm.completion_cost(completion_response=response)
-            except Exception as e:
-                LOG.debug("Failed to calculate LLM cost", error=str(e), exc_info=True)
-                llm_cost = 0
-            prompt_tokens = response.get("usage", {}).get("prompt_tokens", 0)
-            completion_tokens = response.get("usage", {}).get("completion_tokens", 0)
-            reasoning_tokens = 0
-            completion_token_detail = response.get("usage", {}).get("completion_tokens_details")
-            if completion_token_detail:
-                reasoning_tokens = completion_token_detail.reasoning_tokens or 0
-            cached_tokens = 0
-            cached_token_detail = response.get("usage", {}).get("prompt_tokens_details")
-            if cached_token_detail:
-                cached_tokens = cached_token_detail.cached_tokens or 0
+            call_stats = await self.get_call_stats(response)
             if step:
                 await app.DATABASE.update_step(
                     task_id=step.task_id,
                     step_id=step.step_id,
                     organization_id=step.organization_id,
-                    incremental_cost=llm_cost,
-                    incremental_input_tokens=prompt_tokens if prompt_tokens > 0 else None,
-                    incremental_output_tokens=completion_tokens if completion_tokens > 0 else None,
-                    incremental_reasoning_tokens=reasoning_tokens if reasoning_tokens > 0 else None,
-                    incremental_cached_tokens=cached_tokens if cached_tokens > 0 else None,
+                    incremental_cost=call_stats.llm_cost,
+                    incremental_input_tokens=call_stats.input_tokens,
+                    incremental_output_tokens=call_stats.output_tokens,
+                    incremental_reasoning_tokens=call_stats.reasoning_tokens,
+                    incremental_cached_tokens=call_stats.cached_tokens,
                 )
             if thought:
                 await app.DATABASE.update_thought(
                     thought_id=thought.observer_thought_id,
                     organization_id=thought.organization_id,
-                    input_token_count=prompt_tokens if prompt_tokens > 0 else None,
-                    output_token_count=completion_tokens if completion_tokens > 0 else None,
-                    reasoning_token_count=reasoning_tokens if reasoning_tokens > 0 else None,
-                    cached_token_count=cached_tokens if cached_tokens > 0 else None,
-                    thought_cost=llm_cost,
+                    input_token_count=call_stats.input_tokens,
+                    output_token_count=call_stats.output_tokens,
+                    reasoning_token_count=call_stats.reasoning_tokens,
+                    cached_token_count=call_stats.cached_tokens,
+                    thought_cost=call_stats.llm_cost,
                 )
         # Track LLM API handler duration
         duration_seconds = time.perf_counter() - start_time
@@ -711,9 +748,13 @@ class LLMCaller:
         tools: list | None = None,
         timeout: float = settings.LLM_CONFIG_TIMEOUT,
         **active_parameters: dict[str, Any],
-    ) -> ModelResponse | CustomStreamWrapper | AnthropicMessage:
+    ) -> ModelResponse | CustomStreamWrapper | AnthropicMessage | UITarsResponse:
         if self.llm_key and "ANTHROPIC" in self.llm_key:
             return await self._call_anthropic(messages, tools, timeout, **active_parameters)
+
+        # Route UI-TARS models to custom handler instead of LiteLLM
+        if self.llm_key and "UI_TARS" in self.llm_key:
+            return await self._call_ui_tars(messages, tools, timeout, **active_parameters)
 
         return await litellm.acompletion(
             model=self.llm_config.model_name, messages=messages, tools=tools, timeout=timeout, **active_parameters
@@ -756,6 +797,114 @@ class LLMCaller:
             timeout=timeout,
         )
         return response
+
+    async def _call_ui_tars(
+        self,
+        messages: list[dict[str, Any]],
+        tools: list | None = None,
+        timeout: float = settings.LLM_CONFIG_TIMEOUT,
+        **active_parameters: dict[str, Any],
+    ) -> UITarsResponse:
+        """Custom UI-TARS API call using OpenAI client with VolcEngine endpoint."""
+        max_tokens = active_parameters.get("max_completion_tokens") or active_parameters.get("max_tokens") or 400
+        model_name = self.llm_config.model_name.replace("volcengine/", "")
+
+        if not app.UI_TARS_CLIENT:
+            raise ValueError(
+                "UI_TARS_CLIENT not initialized. Please ensure ENABLE_VOLCENGINE=true and VOLCENGINE_API_KEY is set."
+            )
+
+        LOG.info(
+            "UI-TARS request",
+            model_name=model_name,
+            timeout=timeout,
+            messages_length=len(messages),
+        )
+
+        # Use the UI-TARS client (which is OpenAI-compatible with VolcEngine)
+        chat_completion: AsyncIterator[ChatCompletionChunk] = await app.UI_TARS_CLIENT.chat.completions.create(
+            model=model_name,
+            messages=messages,
+            top_p=None,
+            temperature=active_parameters.get("temperature", 0.0),
+            max_tokens=max_tokens,
+            stream=True,
+            seed=None,
+            stop=None,
+            frequency_penalty=None,
+            presence_penalty=None,
+            timeout=timeout,
+        )
+
+        # Aggregate streaming response like in ByteDance example
+        response_content = ""
+        async for message in chat_completion:
+            if message.choices[0].delta.content:
+                response_content += message.choices[0].delta.content
+
+        response = UITarsResponse(response_content, model_name)
+
+        LOG.info(
+            "UI-TARS response",
+            model_name=model_name,
+            response_length=len(response_content),
+            timeout=timeout,
+        )
+        return response
+
+    async def get_call_stats(
+        self, response: ModelResponse | CustomStreamWrapper | AnthropicMessage | UITarsResponse
+    ) -> LLMCallStats:
+        empty_call_stats = LLMCallStats()
+
+        # Handle UI-TARS response (UITarsResponse object from _call_ui_tars)
+        if isinstance(response, UITarsResponse):
+            ui_tars_usage = response.usage
+            return LLMCallStats(
+                llm_cost=0,  # TODO: calculate the cost according to the price: https://www.volcengine.com/docs/82379/1544106
+                input_tokens=ui_tars_usage.get("prompt_tokens", 0),
+                output_tokens=ui_tars_usage.get("completion_tokens", 0),
+                cached_tokens=0,  # only part of model support cached tokens
+                reasoning_tokens=0,
+            )
+
+        if isinstance(response, AnthropicMessage):
+            usage = response.usage
+            input_token_cost = (3.0 / 1000000) * usage.input_tokens
+            output_token_cost = (15.0 / 1000000) * usage.output_tokens
+            cached_token_cost = (0.3 / 1000000) * usage.cache_read_input_tokens
+            llm_cost = input_token_cost + output_token_cost + cached_token_cost
+            return LLMCallStats(
+                llm_cost=llm_cost,
+                input_tokens=usage.input_tokens,
+                output_tokens=usage.output_tokens,
+                cached_tokens=usage.cache_read_input_tokens,
+                reasoning_tokens=0,
+            )
+        elif isinstance(response, (ModelResponse, CustomStreamWrapper)):
+            try:
+                llm_cost = litellm.completion_cost(completion_response=response)
+            except Exception as e:
+                LOG.debug("Failed to calculate LLM cost", error=str(e), exc_info=True)
+                llm_cost = 0
+            input_tokens = response.get("usage", {}).get("prompt_tokens", 0)
+            output_tokens = response.get("usage", {}).get("completion_tokens", 0)
+            reasoning_tokens = 0
+            completion_token_detail = response.get("usage", {}).get("completion_tokens_details")
+            if completion_token_detail:
+                reasoning_tokens = completion_token_detail.reasoning_tokens or 0
+            cached_tokens = 0
+            cached_token_detail = response.get("usage", {}).get("prompt_tokens_details")
+            if cached_token_detail:
+                cached_tokens = cached_token_detail.cached_tokens or 0
+            return LLMCallStats(
+                llm_cost=llm_cost,
+                input_tokens=input_tokens,
+                output_tokens=output_tokens,
+                cached_tokens=cached_tokens,
+                reasoning_tokens=reasoning_tokens,
+            )
+        return empty_call_stats
 
 
 class LLMCallerManager:

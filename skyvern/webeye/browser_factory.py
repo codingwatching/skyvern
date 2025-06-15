@@ -2,8 +2,11 @@ from __future__ import annotations
 
 import asyncio
 import os
+import pathlib
+import platform
 import random
 import re
+import shutil
 import socket
 import subprocess
 import time
@@ -32,7 +35,7 @@ from skyvern.exceptions import (
 from skyvern.forge.sdk.api.files import get_download_dir, make_temp_directory
 from skyvern.forge.sdk.core.skyvern_context import current, ensure_context
 from skyvern.schemas.runs import ProxyLocation, get_tzinfo_from_proxy
-from skyvern.webeye.utils.page import SkyvernFrame
+from skyvern.webeye.utils.page import ScreenshotMode, SkyvernFrame
 
 LOG = structlog.get_logger()
 
@@ -159,7 +162,7 @@ class BrowserContextFactory:
         preference_template = f"{SKYVERN_DIR}/webeye/chromium_preferences.json"
 
         preference_file_content = ""
-        with open(preference_template, "r") as f:
+        with open(preference_template) as f:
             preference_file_content = f.read()
             preference_file_content = preference_file_content.replace("MASK_SAVEFILE_DEFAULT_DIRECTORY", download_dir)
             preference_file_content = preference_file_content.replace("MASK_DOWNLOAD_DEFAULT_DIRECTORY", download_dir)
@@ -278,7 +281,7 @@ class BrowserContextFactory:
 class VideoArtifact(BaseModel):
     video_path: str | None = None
     video_artifact_id: str | None = None
-    video_data: bytes = bytes()
+    video_data: bytes = b""
 
 
 class BrowserArtifacts(BaseModel):
@@ -382,7 +385,7 @@ def _is_port_in_use(port: int) -> bool:
         try:
             s.bind(("localhost", port))
             return False
-        except socket.error:
+        except OSError:
             return True
 
 
@@ -447,6 +450,34 @@ async def _create_headful_chromium(
     return browser_context, browser_artifacts, None
 
 
+def default_user_data_dir() -> pathlib.Path:
+    p = platform.system()
+    if p == "Darwin":
+        return pathlib.Path("~/Library/Application Support/Google/Chrome").expanduser()
+    if p == "Windows":
+        return pathlib.Path(os.environ["LOCALAPPDATA"]) / "Google" / "Chrome" / "User Data"
+    # Assume Linux/Unix
+    return pathlib.Path("~/.config/google-chrome").expanduser()
+
+
+def is_valid_chromium_user_data_dir(directory: str) -> bool:
+    """Check if a directory is a valid Chromium user data directory.
+
+    A valid Chromium user data directory should:
+    1. Exist
+    2. Not be empty
+    3. Contain a 'Default' directory
+    4. Have a 'Preferences' file in the 'Default' directory
+    """
+    if not os.path.exists(directory):
+        return False
+
+    default_dir = os.path.join(directory, "Default")
+    preferences_file = os.path.join(default_dir, "Preferences")
+
+    return os.path.isdir(directory) and os.path.isdir(default_dir) and os.path.isfile(preferences_file)
+
+
 async def _create_cdp_connection_browser(
     playwright: Playwright, proxy_location: ProxyLocation | None = None, **kwargs: dict
 ) -> tuple[BrowserContext, BrowserArtifacts, BrowserCleanupFunc]:
@@ -454,31 +485,48 @@ async def _create_cdp_connection_browser(
     browser_path = settings.CHROME_EXECUTABLE_PATH
 
     if browser_type == "cdp-connect" and browser_path:
-        # First check if Chrome is already running
-        if _is_chrome_running():
-            raise Exception(
-                "Chrome is already running. Please close all Chrome instances before starting with remote debugging."
+        LOG.info("Local browser path is given. Connecting to local browser with CDP", browser_path=browser_path)
+        # First check if the debugging port is running and can be used
+        if not _is_port_in_use(9222):
+            LOG.info("Port 9222 is not in use, starting Chrome", browser_path=browser_path)
+            # Check if Chrome is already running
+            if _is_chrome_running():
+                raise Exception(
+                    "Chrome is already running. Please close all Chrome instances before starting with remote debugging."
+                )
+            # check if ./tmp/user_data_dir exists and if it's a valid Chromium user data directory
+            try:
+                if os.path.exists("./tmp/user_data_dir") and not is_valid_chromium_user_data_dir("./tmp/user_data_dir"):
+                    LOG.info("Removing invalid user data directory")
+                    shutil.rmtree("./tmp/user_data_dir")
+                    shutil.copytree(default_user_data_dir(), "./tmp/user_data_dir")
+                elif not os.path.exists("./tmp/user_data_dir"):
+                    LOG.info("Copying default user data directory")
+                    shutil.copytree(default_user_data_dir(), "./tmp/user_data_dir")
+                else:
+                    LOG.info("User data directory is valid")
+            except FileExistsError:
+                # If directory exists, remove it first then copy
+                shutil.rmtree("./tmp/user_data_dir")
+                shutil.copytree(default_user_data_dir(), "./tmp/user_data_dir")
+            browser_process = subprocess.Popen(
+                [
+                    browser_path,
+                    "--remote-debugging-port=9222",
+                    "--no-first-run",
+                    "--no-default-browser-check",
+                    "--remote-debugging-address=0.0.0.0",
+                    "--user-data-dir=./tmp/user_data_dir",
+                ],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
             )
-
-        # Then check if the debugging port is already in use
-        if _is_port_in_use(9222):
-            raise Exception("Port 9222 is already in use. Another process may be using this port.")
-
-        browser_process = subprocess.Popen(
-            [
-                browser_path,
-                "--remote-debugging-port=9222",
-                "--no-first-run",
-                "--no-default-browser-check",
-                "--remote-debugging-address=0.0.0.0",
-            ],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-        )
-        # Add small delay to allow browser to start
-        time.sleep(2)
-        if browser_process.poll() is not None:
-            raise Exception(f"Failed to open browser. browser_path: {browser_path}")
+            # Add small delay to allow browser to start
+            time.sleep(1)
+            if browser_process.poll() is not None:
+                raise Exception(f"Failed to open browser. browser_path: {browser_path}")
+        else:
+            LOG.info("Port 9222 is in use, using existing browser")
 
     browser_args = BrowserContextFactory.build_browser_args()
 
@@ -817,6 +865,30 @@ class BrowserState:
         except asyncio.TimeoutError:
             LOG.error("Timeout to close playwright, might leave the broswer opening forever")
 
-    async def take_screenshot(self, full_page: bool = False, file_path: str | None = None) -> bytes:
+    async def take_fullpage_screenshot(
+        self,
+        file_path: str | None = None,
+        use_playwright_fullpage: bool = False,  # TODO: THIS IS ONLY FOR EXPERIMENT. will be removed after experiment.
+    ) -> bytes:
         page = await self.__assert_page()
-        return await SkyvernFrame.take_screenshot(page=page, full_page=full_page, file_path=file_path)
+        return await SkyvernFrame.take_scrolling_screenshot(
+            page=page,
+            file_path=file_path,
+            mode=ScreenshotMode.LITE,
+            use_playwright_fullpage=use_playwright_fullpage,
+        )
+
+    async def take_post_action_screenshot(
+        self,
+        scrolling_number: int,
+        file_path: str | None = None,
+        use_playwright_fullpage: bool = False,  # TODO: THIS IS ONLY FOR EXPERIMENT. will be removed after experiment.
+    ) -> bytes:
+        page = await self.__assert_page()
+        return await SkyvernFrame.take_scrolling_screenshot(
+            page=page,
+            file_path=file_path,
+            mode=ScreenshotMode.LITE,
+            scrolling_number=scrolling_number,
+            use_playwright_fullpage=use_playwright_fullpage,
+        )

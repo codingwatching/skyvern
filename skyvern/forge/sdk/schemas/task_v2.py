@@ -4,6 +4,7 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
+from skyvern.config import settings
 from skyvern.schemas.runs import ProxyLocation
 from skyvern.utils.url_validators import validate_url
 
@@ -29,7 +30,7 @@ class TaskV2(BaseModel):
 
     observer_cruise_id: str = Field(alias="task_id")
     status: TaskV2Status
-    organization_id: str | None = None
+    organization_id: str
     workflow_run_id: str | None = None
     workflow_id: str | None = None
     workflow_permanent_id: str | None = None
@@ -43,9 +44,32 @@ class TaskV2(BaseModel):
     webhook_callback_url: str | None = None
     extracted_information_schema: dict | list | str | None = None
     error_code_mapping: dict | None = None
+    model: dict[str, Any] | None = None
+    queued_at: datetime | None = None
+    started_at: datetime | None = None
+    finished_at: datetime | None = None
+    max_screenshot_scrolling_times: int | None = None
 
     created_at: datetime
     modified_at: datetime
+
+    @property
+    def llm_key(self) -> str | None:
+        """
+        If the `TaskV2` has a `model` defined, then return the mapped llm_key for it.
+
+        Otherwise return `None`.
+        """
+
+        if self.model:
+            model_name = self.model.get("model_name")
+            if model_name:
+                mapping = settings.get_model_name_to_llm_key()
+                llm_key = mapping.get(model_name, {}).get("llm_key")
+                if llm_key:
+                    return llm_key
+
+        return None
 
     @field_validator("url", "webhook_callback_url", "totp_verification_url")
     @classmethod
@@ -80,7 +104,7 @@ class Thought(BaseModel):
 
     observer_thought_id: str = Field(alias="thought_id")
     observer_cruise_id: str = Field(alias="task_id")
-    organization_id: str | None = None
+    organization_id: str
     workflow_run_id: str | None = None
     workflow_run_block_id: str | None = None
     workflow_id: str | None = None
@@ -125,6 +149,7 @@ class TaskV2Request(BaseModel):
     publish_workflow: bool = False
     extracted_information_schema: dict | list | str | None = None
     error_code_mapping: dict[str, str] | None = None
+    max_screenshot_scrolling_times: int | None = None
 
     @field_validator("url", "webhook_callback_url", "totp_verification_url")
     @classmethod

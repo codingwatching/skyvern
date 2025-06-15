@@ -8,6 +8,7 @@ from fastapi import status
 from pydantic import BaseModel, Field, field_validator, model_validator
 from typing_extensions import Self
 
+from skyvern.config import settings
 from skyvern.exceptions import (
     InvalidTaskStatusTransition,
     SkyvernHTTPException,
@@ -16,6 +17,7 @@ from skyvern.exceptions import (
 )
 from skyvern.forge.sdk.db.enums import TaskType
 from skyvern.forge.sdk.schemas.files import FileInfo
+from skyvern.schemas.docs.doc_strings import PROXY_LOCATION_DOC_STRING
 from skyvern.schemas.runs import ProxyLocation
 from skyvern.utils.url_validators import validate_url
 
@@ -65,8 +67,7 @@ class TaskBase(BaseModel):
     )
     proxy_location: ProxyLocation | None = Field(
         default=None,
-        description="The location of the proxy to use for the task.",
-        examples=["US-WA", "US-CA", "US-FL", "US-NY", "US-TX"],
+        description=PROXY_LOCATION_DOC_STRING,
     )
     extracted_information_schema: dict[str, Any] | list | str | None = Field(
         default=None,
@@ -90,6 +91,16 @@ class TaskBase(BaseModel):
         description="The application for which the task is running",
         examples=["forms"],
     )
+    include_action_history_in_verification: bool | None = Field(
+        default=False,
+        description="Whether to include the action history when verifying the task is complete",
+        examples=[True, False],
+    )
+    max_screenshot_scrolling_times: int | None = Field(
+        default=None,
+        description="Scroll down n times to get the merged screenshot of the page after taking an action. When it's None or 0, it takes the current viewpoint screenshot.",
+        examples=[10],
+    )
 
 
 class TaskRequest(TaskBase):
@@ -105,6 +116,7 @@ class TaskRequest(TaskBase):
     )
     totp_verification_url: str | None = None
     browser_session_id: str | None = None
+    model: dict[str, Any] | None = None
 
     @model_validator(mode="after")
     def validate_url(self) -> Self:
@@ -224,12 +236,32 @@ class Task(TaskBase):
         None,
         description="The reason for the task failure.",
     )
-    organization_id: str | None = None
+    organization_id: str
     workflow_run_id: str | None = None
+    workflow_permanent_id: str | None = None
     order: int | None = None
     retry: int | None = None
     max_steps_per_run: int | None = None
     errors: list[dict[str, Any]] = []
+    model: dict[str, Any] | None = None
+    queued_at: datetime | None = None
+    started_at: datetime | None = None
+    finished_at: datetime | None = None
+
+    @property
+    def llm_key(self) -> str | None:
+        """
+        If the `Task` has a `model` defined, then return the mapped llm_key for it.
+
+        Otherwise return `None`.
+        """
+        if self.model:
+            model_name = self.model.get("model_name")
+            if model_name:
+                mapping = settings.get_model_name_to_llm_key()
+                return mapping.get(model_name, {}).get("llm_key")
+
+        return None
 
     def validate_update(
         self,
@@ -273,6 +305,9 @@ class Task(TaskBase):
             status=self.status,
             created_at=self.created_at,
             modified_at=self.modified_at,
+            queued_at=self.queued_at,
+            started_at=self.started_at,
+            finished_at=self.finished_at,
             extracted_information=self.extracted_information,
             failure_reason=failure_reason or self.failure_reason,
             action_screenshot_urls=action_screenshot_urls,
@@ -284,6 +319,7 @@ class Task(TaskBase):
             errors=self.errors,
             max_steps_per_run=self.max_steps_per_run,
             workflow_run_id=self.workflow_run_id,
+            max_screenshot_scrolling_times=self.max_screenshot_scrolling_times,
         )
 
 
@@ -304,6 +340,10 @@ class TaskResponse(BaseModel):
     errors: list[dict[str, Any]] = []
     max_steps_per_run: int | None = None
     workflow_run_id: str | None = None
+    queued_at: datetime | None = None
+    started_at: datetime | None = None
+    finished_at: datetime | None = None
+    max_screenshot_scrolling_times: int | None = None
 
 
 class TaskOutput(BaseModel):
@@ -343,3 +383,7 @@ class OrderBy(StrEnum):
 class SortDirection(StrEnum):
     asc = "asc"
     desc = "desc"
+
+
+class ModelsResponse(BaseModel):
+    models: dict[str, str]

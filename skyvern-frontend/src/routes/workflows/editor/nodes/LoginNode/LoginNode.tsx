@@ -35,6 +35,9 @@ import { AppNode } from "..";
 import { getAvailableOutputParameterKeys } from "../../workflowEditorUtils";
 import { useIsFirstBlockInWorkflow } from "../../hooks/useIsFirstNodeInWorkflow";
 import { LoginBlockCredentialSelector } from "./LoginBlockCredentialSelector";
+import { RunEngineSelector } from "@/components/EngineSelector";
+import { ModelSelector } from "@/components/ModelSelector";
+
 function LoginNode({ id, data }: NodeProps<LoginNode>) {
   const { updateNodeData } = useReactFlow();
   const { editable } = data;
@@ -53,6 +56,8 @@ function LoginNode({ id, data }: NodeProps<LoginNode>) {
     totpIdentifier: data.totpIdentifier,
     completeCriterion: data.completeCriterion,
     terminateCriterion: data.terminateCriterion,
+    engine: data.engine,
+    model: data.model,
   });
   const deleteNodeCallback = useDeleteNodeCallback();
 
@@ -175,6 +180,13 @@ function LoginNode({ id, data }: NodeProps<LoginNode>) {
             <AccordionContent className="pl-6 pr-1 pt-1">
               <div className="space-y-4">
                 <div className="space-y-2">
+                  <ModelSelector
+                    className="nopan w-52 text-xs"
+                    value={inputs.model}
+                    onChange={(value) => {
+                      handleChange("model", value);
+                    }}
+                  />
                   <ParametersMultiSelect
                     availableOutputParameters={outputParameterKeys}
                     parameters={data.parameterKeys}
@@ -197,6 +209,20 @@ function LoginNode({ id, data }: NodeProps<LoginNode>) {
                   />
                 </div>
                 <Separator />
+                <div className="flex items-center justify-between">
+                  <div className="flex gap-2">
+                    <Label className="text-xs font-normal text-slate-300">
+                      Engine
+                    </Label>
+                  </div>
+                  <RunEngineSelector
+                    value={inputs.engine}
+                    onChange={(value) => {
+                      handleChange("engine", value);
+                    }}
+                    className="nopan w-52 text-xs"
+                  />
+                </div>
                 <div className="flex items-center justify-between">
                   <div className="flex gap-2">
                     <Label className="text-xs font-normal text-slate-300">

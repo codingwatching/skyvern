@@ -32,6 +32,7 @@ from skyvern.exceptions import (
     FailToSelectByValue,
     IllegitComplete,
     ImaginaryFileUrl,
+    InputToInvisibleElement,
     InteractWithDisabledElement,
     InteractWithDropdownContainer,
     InvalidElementForTextInput,
@@ -59,7 +60,7 @@ from skyvern.forge.sdk.api.files import (
     list_files_in_directory,
     wait_for_download_finished,
 )
-from skyvern.forge.sdk.api.llm.api_handler_factory import LLMCallerManager
+from skyvern.forge.sdk.api.llm.api_handler_factory import LLMAPIHandlerFactory, LLMCallerManager
 from skyvern.forge.sdk.api.llm.exceptions import LLMProviderError
 from skyvern.forge.sdk.core import skyvern_context
 from skyvern.forge.sdk.core.aiohttp_helper import aiohttp_post
@@ -69,12 +70,14 @@ from skyvern.forge.sdk.db.enums import OrganizationAuthTokenType
 from skyvern.forge.sdk.models import Step
 from skyvern.forge.sdk.schemas.tasks import Task
 from skyvern.forge.sdk.services.bitwarden import BitwardenConstants
+from skyvern.forge.sdk.services.credentials import OnePasswordConstants
+from skyvern.schemas.runs import CUA_RUN_TYPES
 from skyvern.utils.prompt_engine import CheckPhoneNumberFormatResponse, load_prompt_with_elements
-from skyvern.webeye.actions import actions
+from skyvern.webeye.actions import actions, handler_utils
+from skyvern.webeye.actions.action_types import ActionType
 from skyvern.webeye.actions.actions import (
     Action,
     ActionStatus,
-    ActionType,
     CheckboxAction,
     ClickAction,
     InputOrSelectContext,
@@ -94,11 +97,10 @@ from skyvern.webeye.scraper.scraper import (
     json_to_html,
     trim_element_tree,
 )
-from skyvern.webeye.utils.dom import DomUtil, InteractiveElement, SkyvernElement
+from skyvern.webeye.utils.dom import COMMON_INPUT_TAGS, DomUtil, InteractiveElement, SkyvernElement
 from skyvern.webeye.utils.page import SkyvernFrame
 
 LOG = structlog.get_logger()
-COMMON_INPUT_TAGS = {"input", "textarea", "select"}
 
 
 class CustomSingleSelectResult:
@@ -478,9 +480,11 @@ async def handle_click_action(
     task: Task,
     step: Step,
 ) -> list[ActionResult]:
+    dom = DomUtil(scraped_page=scraped_page, page=page)
+    original_url = page.url
     if action.x is not None and action.y is not None:
         # Find the element at the clicked location using JavaScript evaluation
-        element_id = await page.evaluate(
+        element_id: str | None = await page.evaluate(
             """data => {
             const element = document.elementFromPoint(data.x, data.y);
             if (!element) return null;
@@ -504,6 +508,10 @@ async def handle_click_action(
             {"x": action.x, "y": action.y},
         )
         LOG.info("Clicked element at location", x=action.x, y=action.y, element_id=element_id, button=action.button)
+        if element_id:
+            skyvern_element = await dom.get_skyvern_element_by_id(element_id)
+            if await skyvern_element.navigate_to_a_href(page=page):
+                return [ActionSuccess()]
 
         if action.repeat == 1:
             await page.mouse.click(x=action.x, y=action.y, button=action.button)
@@ -516,7 +524,6 @@ async def handle_click_action(
 
         return [ActionSuccess()]
 
-    dom = DomUtil(scraped_page=scraped_page, page=page)
     skyvern_element = await dom.get_skyvern_element_by_id(action.element_id)
     await asyncio.sleep(0.3)
 
@@ -591,16 +598,107 @@ async def handle_click_action(
                         workflow_run_id=task.workflow_run_id,
                     )
     else:
-        results = await chain_click(
-            task,
-            scraped_page,
-            page,
-            action,
-            skyvern_element,
-            timeout=settings.BROWSER_ACTION_TIMEOUT_MS,
-        )
+        incremental_scraped: IncrementalScrapePage | None = None
+        try:
+            skyvern_frame = await SkyvernFrame.create_instance(skyvern_element.get_frame())
+            incremental_scraped = IncrementalScrapePage(skyvern_frame=skyvern_frame)
+            await incremental_scraped.start_listen_dom_increment(await skyvern_element.get_element_handler())
+
+            results = await chain_click(
+                task,
+                scraped_page,
+                page,
+                action,
+                skyvern_element,
+                timeout=settings.BROWSER_ACTION_TIMEOUT_MS,
+            )
+            if page.url != original_url:
+                return results
+
+            if results and not isinstance(results[-1], ActionSuccess):
+                return results
+
+            try:
+                if sequential_click_result := await handle_sequential_click_for_dropdown(
+                    action=action,
+                    anchor_element=skyvern_element,
+                    dom=dom,
+                    page=page,
+                    scraped_page=scraped_page,
+                    incremental_scraped=incremental_scraped,
+                    task=task,
+                    step=step,
+                ):
+                    results.append(sequential_click_result)
+                    return results
+
+            except Exception:
+                LOG.warning(
+                    "Failed to do sequential logic for the click action, skipping",
+                    exc_info=True,
+                    step_id=step.step_id,
+                    task_id=task.task_id,
+                    element_id=skyvern_element.get_id(),
+                )
+                return results
+
+        finally:
+            if incremental_scraped:
+                await incremental_scraped.stop_listen_dom_increment()
 
     return results
+
+
+async def handle_sequential_click_for_dropdown(
+    action: actions.ClickAction,
+    anchor_element: SkyvernElement,
+    dom: DomUtil,
+    page: Page,
+    scraped_page: ScrapedPage,
+    incremental_scraped: IncrementalScrapePage,
+    task: Task,
+    step: Step,
+) -> ActionResult | None:
+    if await incremental_scraped.get_incremental_elements_num() == 0:
+        return None
+
+    incremental_elements = await incremental_scraped.get_incremental_element_tree(
+        clean_and_remove_element_tree_factory(
+            task=task, step=step, check_filter_funcs=[check_existed_but_not_option_element_in_dom_factory(dom)]
+        ),
+    )
+
+    if len(incremental_elements) == 0:
+        return None
+
+    LOG.info("Detected new element after clicking", action=action)
+    dropdown_menu_element = await locate_dropdown_menu(
+        current_anchor_element=anchor_element,
+        incremental_scraped=incremental_scraped,
+        step=step,
+        task=task,
+    )
+
+    if dropdown_menu_element is None:
+        return None
+
+    LOG.info(
+        "Found the dropdown menu element after clicking, triggering the sequential click logic",
+        step_id=step.step_id,
+        task_id=task.task_id,
+        element_id=dropdown_menu_element.get_id(),
+    )
+
+    return await select_from_emerging_elements(
+        current_element_id=anchor_element.get_id(),
+        options=CustomSelectPromptOptions(
+            field_information=action.intention if action.intention else action.reasoning,
+        ),  # FIXME: need a better options data
+        page=page,
+        scraped_page=scraped_page,
+        step=step,
+        task=task,
+    )
 
 
 async def handle_click_to_download_file_action(
@@ -626,7 +724,8 @@ async def handle_click_to_download_file_action(
     )
 
     try:
-        await locator.click(timeout=settings.BROWSER_ACTION_TIMEOUT_MS)
+        if not await skyvern_element.navigate_to_a_href(page=page):
+            await locator.click(timeout=settings.BROWSER_ACTION_TIMEOUT_MS)
         await page.wait_for_load_state(timeout=settings.BROWSER_LOADING_TIMEOUT_MS)
     except Exception as e:
         LOG.exception(
@@ -722,6 +821,9 @@ async def handle_input_text_action(
     text: str | None = await get_actual_value_of_parameter_if_secret(task, action.text)
     if text is None:
         return [ActionFailure(FailedToFetchSecret())]
+
+    is_totp_value = text == BitwardenConstants.TOTP or text == OnePasswordConstants.TOTP
+    is_secret_value = text != action.text
 
     # dynamically validate the attr, since it could change into enabled after the previous actions
     if await skyvern_element.is_disabled(dynamic=True):
@@ -876,11 +978,16 @@ async def handle_input_text_action(
                     await skyvern_element.blur()
                 await incremental_scraped.stop_listen_dom_increment()
 
+    ### Start filling text logic
+    # check if the element has hidden attribute
+    if await skyvern_element.has_hidden_attr():
+        return [ActionFailure(InputToInvisibleElement(skyvern_element.get_id()), stop_execution_on_failure=False)]
+
     # force to move focus back to the element
     await skyvern_element.get_locator().focus(timeout=timeout)
 
     # check the phone number format when type=tel and the text is not a secret value
-    if await skyvern_element.get_attr("type") == "tel" and text == action.text:
+    if not is_secret_value and await skyvern_element.get_attr("type") == "tel":
         try:
             text = await check_phone_number_format(
                 value=text,
@@ -913,6 +1020,8 @@ async def handle_input_text_action(
             if not class_name or "blinking-cursor" not in class_name:
                 return [ActionFailure(InvalidElementForTextInput(element_id=action.element_id, tag_name=tag_name))]
 
+            if is_totp_value:
+                text = generate_totp_value(task=task, parameter=action.text)
             await skyvern_element.press_fill(text=text)
             return [ActionSuccess()]
 
@@ -934,6 +1043,12 @@ async def handle_input_text_action(
             task_id=task.task_id,
             step_id=step.step_id,
         )
+
+    if is_totp_value:
+        LOG.info("Skipping the auto completion logic since it's a TOTP input")
+        text = generate_totp_value(task=task, parameter=action.text)
+        await skyvern_element.input(text)
+        return [ActionSuccess()]
 
     try:
         # TODO: not sure if this case will trigger auto-completion
@@ -1338,10 +1453,18 @@ async def handle_select_option_action(
         )
 
         if len(incremental_element) == 0:
+            LOG.info(
+                "No incremental elements detected by MutationObserver, using re-scraping the page to find the match element"
+            )
             results.append(
                 await select_from_emerging_elements(
-                    action=action,
-                    input_or_select_context=input_or_select_context,
+                    current_element_id=skyvern_element.get_id(),
+                    options=CustomSelectPromptOptions(
+                        is_date_related=input_or_select_context.is_date_related or False,
+                        field_information=input_or_select_context.intention or input_or_select_context.field or "",
+                        required_field=input_or_select_context.is_required or False,
+                        target_value=action.option.label or action.option.value or "",
+                    ),
                     page=page,
                     scraped_page=scraped_page,
                     task=task,
@@ -1622,6 +1745,9 @@ async def handle_keypress_action(
             updated_keys.append("Escape")
         elif key_lower_case == "alt":
             updated_keys.append("Alt")
+        elif key_lower_case.startswith("f") and key_lower_case[1:].isdigit():
+            # Handle function keys: f1 -> F1, f5 -> F5, etc.
+            updated_keys.append(key_lower_case.upper())
         else:
             updated_keys.append(key)
     keypress_str = "+".join(updated_keys)
@@ -1728,13 +1854,18 @@ async def get_actual_value_of_parameter_if_secret(task: Task, parameter: str) ->
 
     workflow_run_context = app.WORKFLOW_CONTEXT_MANAGER.get_workflow_run_context(task.workflow_run_id)
     secret_value = workflow_run_context.get_original_secret_value_or_none(parameter)
-
-    if secret_value == BitwardenConstants.TOTP:
-        totp_secret_key = workflow_run_context.totp_secret_value_key(parameter)
-        totp_secret = workflow_run_context.get_original_secret_value_or_none(totp_secret_key)
-        totp_secret_no_whitespace = "".join(totp_secret.split())
-        secret_value = pyotp.TOTP(totp_secret_no_whitespace).now()
     return secret_value if secret_value is not None else parameter
+
+
+def generate_totp_value(task: Task, parameter: str) -> str:
+    if task.workflow_run_id is None:
+        return parameter
+
+    workflow_run_context = app.WORKFLOW_CONTEXT_MANAGER.get_workflow_run_context(task.workflow_run_id)
+    totp_secret_key = workflow_run_context.totp_secret_value_key(parameter)
+    totp_secret = workflow_run_context.get_original_secret_value_or_none(totp_secret_key)
+    totp_secret_no_whitespace = "".join(totp_secret.split())
+    return pyotp.TOTP(totp_secret_no_whitespace).now()
 
 
 async def chain_click(
@@ -1756,15 +1887,7 @@ async def chain_click(
     file: list[str] | str = []
     if action.file_url:
         file_url = await get_actual_value_of_parameter_if_secret(task, action.file_url)
-        try:
-            file = await download_file(file_url)
-        except Exception:
-            LOG.exception(
-                "Failed to download file, continuing without it",
-                action=action,
-                file_url=file_url,
-            )
-            file = []
+        file = await handler_utils.download_file(file_url, action.model_dump())
 
     is_filechooser_trigger = False
 
@@ -1781,9 +1904,9 @@ async def chain_click(
     :param css: css of the element to click
     """
     try:
-        await locator.click(timeout=timeout)
-
-        LOG.info("Chain click: main element click succeeded", action=action, locator=locator)
+        if not await skyvern_element.navigate_to_a_href(page=page):
+            await locator.click(timeout=timeout)
+            LOG.info("Chain click: main element click succeeded", action=action, locator=locator)
         return [ActionSuccess()]
 
     except Exception as e:
@@ -2119,8 +2242,8 @@ async def input_or_auto_complete_input(
     # 3. try each potential values from #2
     # 4. call LLM to tweak the orignal text according to the information from #3, then start #1 again
 
-    # FIXME: try the whole loop for twice now, to prevent too many LLM calls
-    MAX_AUTO_COMPLETE_ATTEMP = 2
+    # FIXME: try the whole loop for once now, to speed up skyvern
+    MAX_AUTO_COMPLETE_ATTEMP = 1
     current_attemp = 0
     current_value = text
     result = AutoCompletionResult()
@@ -2221,6 +2344,7 @@ async def input_or_auto_complete_input(
             tried_values.append(value)
             whole_new_elements.extend(result.incremental_elements)
 
+        # WARN: currently, we don't trigger this logic because MAX_AUTO_COMPLETE_ATTEMP is 1, to speed up skyvern
         if current_attemp < MAX_AUTO_COMPLETE_ATTEMP:
             LOG.info(
                 "Ask LLM to tweak the current value based on tried input values",
@@ -2280,6 +2404,7 @@ async def sequentially_select_from_dropdown(
     dropdown_menu_element: SkyvernElement | None = None,
     force_select: bool = False,
     target_value: str = "",
+    continue_until_close: bool = False,
 ) -> CustomSingleSelectResult | None:
     """
     TODO: support to return all values retrieved from the sequentially select
@@ -2405,6 +2530,14 @@ async def sequentially_select_from_dropdown(
             )
             continue
 
+        if continue_until_close:
+            LOG.info(
+                "Continue the selecting until the dropdown menu is closed",
+                step_id=step.step_id,
+                task_id=task.task_id,
+            )
+            continue
+
         screenshot = await page.screenshot(timeout=settings.BROWSER_SCREENSHOT_TIMEOUT_MS)
         mini_goal = (
             input_or_select_context.field
@@ -2420,7 +2553,8 @@ async def sequentially_select_from_dropdown(
             select_history=json.dumps(build_sequential_select_history(select_history)),
             local_datetime=datetime.now(ensure_context().tz_info).isoformat(),
         )
-        json_response = await app.LLM_API_HANDLER(
+        llm_api_handler = LLMAPIHandlerFactory.get_override_llm_api_handler(task.llm_key, default=app.LLM_API_HANDLER)
+        json_response = await llm_api_handler(
             prompt=prompt, screenshots=[screenshot], step=step, prompt_name="confirm-multi-selection-finish"
         )
         if json_response.get("is_mini_goal_finished", False):
@@ -2442,18 +2576,36 @@ def build_sequential_select_history(history_list: list[CustomSingleSelectResult]
     return result
 
 
+class CustomSelectPromptOptions(BaseModel):
+    """
+    This is the options for the custom select prompt.
+    It's used to generate the prompt for the custom select action.
+    is_date_related: whether the field is date related
+    required_field: whether the field is required
+    field_information: the description about the field, could be field name, action intention, action reasoning about the field, etc.
+    target_value: the target value of the field (generated by the LLM in the main prompt).
+    """
+
+    is_date_related: bool = False
+    required_field: bool = False
+    field_information: str = ""
+    target_value: str | None = None
+
+
 async def select_from_emerging_elements(
-    action: SelectOptionAction,
-    input_or_select_context: InputOrSelectContext,
+    current_element_id: str,
+    options: CustomSelectPromptOptions,
     page: Page,
     scraped_page: ScrapedPage,
     step: Step,
     task: Task,
 ) -> ActionResult:
+    """
+    This is the function to select an element from the new showing elements.
+    Currently mainly used for the dropdown menu selection.
+    """
+
     # TODO: support to handle the case when options are loaded by scroll
-    LOG.info(
-        "No incremental elements detected by MutationObserver, using re-scraping the page to find the match element"
-    )
     scraped_page_after_open = await scraped_page.generate_scraped_page_without_screenshots()
     new_element_ids = set(scraped_page_after_open.id_to_css_dict.keys()) - set(scraped_page.id_to_css_dict.keys())
 
@@ -2465,18 +2617,16 @@ async def select_from_emerging_elements(
     ]
 
     if len(new_interactable_element_ids) == 0:
-        raise NoIncrementalElementFoundForCustomSelection(element_id=action.element_id)
+        raise NoIncrementalElementFoundForCustomSelection(element_id=current_element_id)
 
     prompt = load_prompt_with_elements(
         scraped_page=scraped_page_after_open,
         prompt_engine=prompt_engine,
         template_name="custom-select",
-        is_date_related=input_or_select_context.is_date_related,
-        field_information=input_or_select_context.field
-        if not input_or_select_context.intention
-        else input_or_select_context.intention,
-        required_field=input_or_select_context.is_required,
-        target_value=action.option.label,
+        is_date_related=options.is_date_related,
+        field_information=options.field_information,
+        required_field=options.required_field,
+        target_value=options.target_value,
         navigation_goal=task.navigation_goal,
         new_elements_ids=new_interactable_element_ids,
         navigation_payload_str=json.dumps(task.navigation_payload),
@@ -2488,7 +2638,8 @@ async def select_from_emerging_elements(
         task_id=task.task_id,
     )
 
-    json_response = await app.LLM_API_HANDLER(prompt=prompt, step=step, prompt_name="custom-select")
+    llm_api_handler = LLMAPIHandlerFactory.get_override_llm_api_handler(task.llm_key, default=app.LLM_API_HANDLER)
+    json_response = await llm_api_handler(prompt=prompt, step=step, prompt_name="custom-select")
     value: str | None = json_response.get("value", None)
     LOG.info(
         "LLM response for the matched element",
@@ -3028,7 +3179,7 @@ async def normal_select(
 ) -> List[ActionResult]:
     try:
         current_text = await skyvern_element.get_attr("selected")
-        if current_text == action.option.label or current_text == action.option.value:
+        if current_text and (current_text == action.option.label or current_text == action.option.value):
             return [ActionSuccess()]
     except Exception:
         LOG.info("failed to confirm if the select option has been done, force to take the action again.")
@@ -3056,6 +3207,7 @@ async def normal_select(
         step_id=step.step_id,
     )
 
+    await skyvern_element.refresh_select_options()
     options_html = skyvern_element.build_HTML()
     field_information = (
         input_or_select_context.field if not input_or_select_context.intention else input_or_select_context.intention
@@ -3225,7 +3377,14 @@ async def extract_information_for_navigation_goal(
         local_datetime=datetime.now(context.tz_info).isoformat(),
     )
 
-    json_response = await app.LLM_API_HANDLER(
+    task_run = await app.DATABASE.get_run(run_id=task.task_id, organization_id=task.organization_id)
+    llm_key_override = task.llm_key
+    if task_run and task_run.task_run_type in CUA_RUN_TYPES:
+        # CUA tasks should use the default data extraction llm key
+        llm_key_override = None
+
+    llm_api_handler = LLMAPIHandlerFactory.get_override_llm_api_handler(llm_key_override, default=app.LLM_API_HANDLER)
+    json_response = await llm_api_handler(
         prompt=extract_information_prompt,
         step=step,
         screenshots=scraped_page.screenshots,
@@ -3303,10 +3462,11 @@ async def poll_verification_code(
     while True:
         # check timeout
         if datetime.utcnow() > timeout_datetime:
-            LOG.warning("Polling verification code timed out", workflow_id=workflow_id)
+            LOG.warning("Polling verification code timed out")
             raise NoTOTPVerificationCodeFound(
                 task_id=task_id,
                 workflow_run_id=workflow_run_id,
+                workflow_id=workflow_permanent_id,
                 totp_verification_url=totp_verification_url,
                 totp_identifier=totp_identifier,
             )
@@ -3323,7 +3483,7 @@ async def poll_verification_code(
                 task_id,
                 organization_id,
                 totp_identifier,
-                workflow_id=workflow_id,
+                workflow_id=workflow_permanent_id,
                 workflow_run_id=workflow_run_id,
             )
         if verification_code:

@@ -42,6 +42,10 @@ function RetryTask() {
             ? JSON.stringify(task.request.error_code_mapping, null, 2)
             : "",
           proxyLocation: task.request.proxy_location ?? null,
+          includeActionHistoryInVerification:
+            task.request.include_action_history_in_verification ?? false,
+          maxScreenshotScrollingTimes:
+            task.request.max_screenshot_scrolling_times ?? null,
         }}
       />
     </div>
