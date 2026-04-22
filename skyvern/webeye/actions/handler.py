@@ -61,6 +61,7 @@ from skyvern.experimentation.wait_utils import get_or_create_wait_config, get_wa
 from skyvern.forge import app
 from skyvern.forge.prompts import prompt_engine
 from skyvern.forge.sdk.api.files import (
+    calculate_sha256_for_file,
     check_downloading_files_and_wait_for_download_to_complete,
     get_download_dir,
     list_files_in_directory,
@@ -522,9 +523,31 @@ class ActionHandler:
                 timeout=task.download_timeout or BROWSER_DOWNLOAD_TIMEOUT,
             )
 
-            # Calculate newly downloaded file names
+            # Calculate newly downloaded file names and deduplicate local files by checksum.
+            # A single click can trigger multiple identical downloads (e.g., when an <a> click
+            # event bubbles to a parent <tr onclick> that opens the same URL).
+            # Only local files are deduplicated — remote URIs (s3://, azure://) from browser
+            # sessions are passed through as-is since we cannot hash or remove them locally.
             new_file_paths = set(list_files_after) - set(list_files_before)
-            downloaded_file_names = [os.path.basename(fp) for fp in new_file_paths]
+            seen_checksums: dict[str, str] = {}
+            deduplicated_paths: list[str] = []
+            for fp in sorted(new_file_paths):
+                if not os.path.isfile(fp):
+                    deduplicated_paths.append(fp)
+                    continue
+                checksum = calculate_sha256_for_file(fp)
+                if checksum in seen_checksums:
+                    LOG.info(
+                        "Removing duplicate downloaded file from single action",
+                        file=os.path.basename(fp),
+                        duplicate_of=os.path.basename(seen_checksums[checksum]),
+                        checksum=checksum,
+                    )
+                    os.remove(fp)
+                else:
+                    seen_checksums[checksum] = fp
+                    deduplicated_paths.append(fp)
+            downloaded_file_names = [os.path.basename(fp) for fp in deduplicated_paths]
             if downloaded_file_names:
                 results[-1].downloaded_files = downloaded_file_names
                 action.downloaded_files = downloaded_file_names
